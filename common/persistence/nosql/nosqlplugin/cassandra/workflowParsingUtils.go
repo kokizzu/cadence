@@ -22,6 +22,7 @@
 package cassandra
 
 import (
+	"reflect"
 	"time"
 
 	"github.com/uber/cadence/common"
@@ -361,7 +362,11 @@ func parseChildExecutionInfo(
 		case "event_data_encoding":
 			encoding = common.EncodingType(v.(string))
 		case "domain_id":
-			info.DomainID = v.(gocql.UUID).String()
+			if reflect.ValueOf(v).IsNil() {
+				info.DomainID = ""
+			} else {
+				info.DomainID = v.(gocql.UUID).String()
+			}
 		case "domain_name":
 			info.DomainNameDEPRECATED = v.(string)
 		case "workflow_type_name":
