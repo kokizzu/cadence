@@ -1185,6 +1185,7 @@ const (
 	// Default value: 0
 	// Allowed filters: DomainName
 	MutableStateChecksumVerifyProbability
+	TaskSchedulerMigrationRatio
 	// MaxActivityCountDispatchByDomain max # of activity tasks to dispatch to matching before creating transfer tasks. This is an performance optimization to skip activity scheduling efforts.
 	// KeyName: history.activityDispatchForSyncMatchCountByDomain
 	// Value type: Int
@@ -1442,7 +1443,7 @@ const (
 	// WorkflowDeletionJitterRange defines the duration in minutes for workflow close tasks jittering
 	// KeyName: system.workflowDeletionJitterRange
 	// Value type: Int
-	// Default value: 1 (no jittering)
+	// Default value: 60 (no jittering)
 	WorkflowDeletionJitterRange
 
 	// SampleLoggingRate defines the rate we want sampled logs to be logged at
@@ -1697,6 +1698,7 @@ const (
 	TransferProcessorEnableValidator
 	TaskSchedulerEnableRateLimiter
 	TaskSchedulerEnableRateLimiterShadowMode
+	TaskSchedulerEnableMigration
 	// EnableAdminProtection is whether to enable admin checking
 	// KeyName: history.enableAdminProtection
 	// Value type: Bool
@@ -2038,6 +2040,7 @@ const (
 	MatchingEnableClientAutoConfig
 
 	EnableNoSQLHistoryTaskDualWriteMode
+	ReadNoSQLHistoryTaskFromDataBlob
 
 	// LastBoolKey must be the last one in this const group
 	LastBoolKey
@@ -2806,6 +2809,7 @@ const (
 	// Default value: please see common.ConvertIntMapToDynamicConfigMapProperty(DefaultTaskPriorityWeight) in code base
 	// Allowed filters: N/A
 	TaskSchedulerRoundRobinWeights
+	TaskSchedulerDomainRoundRobinWeights
 	// QueueProcessorPendingTaskSplitThreshold is the threshold for the number of pending tasks per domain
 	// KeyName: history.queueProcessorPendingTaskSplitThreshold
 	// Value type: Map
@@ -2825,6 +2829,13 @@ const (
 	// Default value: empty map
 	// Allowed filters: N/A
 	PinotOptimizedQueryColumns
+
+	// SearchAttributesHiddenValueKeys is the list of search attributes that values should be hidden
+	// KeyName: frontend.searchAttributesHiddenValueKeys
+	// Value type: Map
+	// Default value: empty map
+	// Allowed filters: N/A
+	SearchAttributesHiddenValueKeys
 
 	// LastMapKey must be the last one in this const group
 	LastMapKey
@@ -3614,6 +3625,11 @@ var IntKeys = map[IntKey]DynamicInt{
 		Description:  "MutableStateChecksumVerifyProbability is the probability [0-100] that checksum will be verified for mutable state",
 		DefaultValue: 0,
 	},
+	TaskSchedulerMigrationRatio: {
+		KeyName:      "history.taskSchedulerMigrationRatio",
+		Description:  "TaskSchedulerMigrationRatio is the ratio of task that is migrated to new scheduler",
+		DefaultValue: 0,
+	},
 	MaxActivityCountDispatchByDomain: {
 		KeyName:      "history.maxActivityCountDispatchByDomain",
 		Description:  "MaxActivityCountDispatchByDomain max # of activity tasks to dispatch to matching before creating transfer tasks. This is an performance optimization to skip activity scheduling efforts.",
@@ -4082,6 +4098,11 @@ var BoolKeys = map[BoolKey]DynamicBool{
 		Description:  "TaskSchedulerEnableRateLimiterShadowMode indicates whether the task scheduler rate limiter is in shadow mode",
 		DefaultValue: true,
 	},
+	TaskSchedulerEnableMigration: {
+		KeyName:      "history.taskSchedulerEnableMigration",
+		Description:  "TaskSchedulerEnableMigration indicates whether the task scheduler migration is enabled",
+		DefaultValue: false,
+	},
 	EnableAdminProtection: {
 		KeyName:      "history.enableAdminProtection",
 		Description:  "EnableAdminProtection is whether to enable admin checking",
@@ -4383,6 +4404,11 @@ var BoolKeys = map[BoolKey]DynamicBool{
 	EnableNoSQLHistoryTaskDualWriteMode: {
 		KeyName:      "history.enableNoSQLHistoryTaskDualWrite",
 		Description:  "EnableHistoryTaskDualWrite is to enable dual write of history events",
+		DefaultValue: false,
+	},
+	ReadNoSQLHistoryTaskFromDataBlob: {
+		KeyName:      "history.readNoSQLHistoryTaskFromDataBlob",
+		Description:  "ReadNoSQLHistoryTaskFromDataBlob is to read history tasks from data blob",
 		DefaultValue: false,
 	},
 }
@@ -5083,6 +5109,12 @@ var MapKeys = map[MapKey]DynamicMap{
 		Description:  "TaskSchedulerRoundRobinWeights is the priority weight for weighted round robin task scheduler",
 		DefaultValue: common.ConvertIntMapToDynamicConfigMapProperty(DefaultTaskSchedulerRoundRobinWeights),
 	},
+	TaskSchedulerDomainRoundRobinWeights: {
+		KeyName:      "history.taskSchedulerDomainRoundRobinWeight",
+		Description:  "TaskSchedulerDomainRoundRobinWeights is the priority round robin weights for domains",
+		Filters:      []Filter{DomainName},
+		DefaultValue: common.ConvertIntMapToDynamicConfigMapProperty(DefaultTaskSchedulerRoundRobinWeights),
+	},
 	QueueProcessorPendingTaskSplitThreshold: {
 		KeyName:      "history.queueProcessorPendingTaskSplitThreshold",
 		Description:  "QueueProcessorPendingTaskSplitThreshold is the threshold for the number of pending tasks per domain",
@@ -5096,6 +5128,11 @@ var MapKeys = map[MapKey]DynamicMap{
 	PinotOptimizedQueryColumns: {
 		KeyName:      "frontend.pinotOptimizedQueryColumns",
 		Description:  "PinotOptimizedQueryColumns is the list of search attributes that can be used in pinot optimized query",
+		DefaultValue: map[string]interface{}{},
+	},
+	SearchAttributesHiddenValueKeys: {
+		KeyName:      "frontend.searchAttributesHiddenValueKeys",
+		Description:  "SearchAttributesHiddenValueKeys is the list of search attributes that values should be hidden",
 		DefaultValue: map[string]interface{}{},
 	},
 }

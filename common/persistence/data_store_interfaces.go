@@ -125,10 +125,10 @@ type (
 		CreateFailoverMarkerTasks(ctx context.Context, request *CreateFailoverMarkersRequest) error
 
 		// Timer related methods.
-		GetTimerIndexTasks(ctx context.Context, request *GetTimerIndexTasksRequest) (*GetTimerIndexTasksResponse, error)
 		CompleteTimerTask(ctx context.Context, request *CompleteTimerTaskRequest) error
 
 		// History task related methods
+		GetHistoryTasks(ctx context.Context, request *GetHistoryTasksRequest) (*GetHistoryTasksResponse, error)
 		RangeCompleteHistoryTask(ctx context.Context, request *RangeCompleteHistoryTaskRequest) (*RangeCompleteHistoryTaskResponse, error)
 
 		// Scan related methods
@@ -904,6 +904,14 @@ type (
 	}
 )
 
+func (tr *InternalGetHistoryTreeResponse) ByBranchID() map[string]*types.HistoryBranch {
+	out := make(map[string]*types.HistoryBranch, len(tr.Branches))
+	for _, branch := range tr.Branches {
+		out[branch.BranchID] = branch
+	}
+	return out
+}
+
 // NewDataBlob returns a new DataBlob
 func NewDataBlob(data []byte, encodingType common.EncodingType) *DataBlob {
 	if len(data) == 0 {
@@ -1001,5 +1009,51 @@ func NewDataBlobFromInternal(blob *types.DataBlob) *DataBlob {
 		}
 	default:
 		panic(fmt.Sprintf("NewDataBlobFromInternal with unsupported encoding type: %v", blob.GetEncodingType()))
+	}
+}
+
+func (t *InternalReplicationTaskInfo) ToTask() (Task, error) {
+	switch t.TaskType {
+	case ReplicationTaskTypeHistory:
+		return &HistoryReplicationTask{
+			WorkflowIdentifier: WorkflowIdentifier{
+				DomainID:   t.DomainID,
+				WorkflowID: t.WorkflowID,
+				RunID:      t.RunID,
+			},
+			TaskData: TaskData{
+				Version:             t.Version,
+				TaskID:              t.TaskID,
+				VisibilityTimestamp: t.CreationTime,
+			},
+			FirstEventID:      t.FirstEventID,
+			NextEventID:       t.NextEventID,
+			BranchToken:       t.BranchToken,
+			NewRunBranchToken: t.NewRunBranchToken,
+		}, nil
+	case ReplicationTaskTypeSyncActivity:
+		return &SyncActivityTask{
+			WorkflowIdentifier: WorkflowIdentifier{
+				DomainID:   t.DomainID,
+				WorkflowID: t.WorkflowID,
+				RunID:      t.RunID,
+			},
+			TaskData: TaskData{
+				Version:             t.Version,
+				TaskID:              t.TaskID,
+				VisibilityTimestamp: t.CreationTime,
+			},
+			ScheduledID: t.ScheduledID,
+		}, nil
+	case ReplicationTaskTypeFailoverMarker:
+		return &FailoverMarkerTask{
+			TaskData: TaskData{
+				Version: t.Version,
+				TaskID:  t.TaskID,
+			},
+			DomainID: t.DomainID,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unknown task type: %d", t.TaskType)
 	}
 }
