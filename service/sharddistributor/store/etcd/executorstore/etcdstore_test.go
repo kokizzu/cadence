@@ -3,13 +3,16 @@ package executorstore
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/fx/fxtest"
+	"gopkg.in/yaml.v2"
 
+	"github.com/uber/cadence/common/config"
 	"github.com/uber/cadence/common/log/testlogger"
 	"github.com/uber/cadence/common/types"
 	"github.com/uber/cadence/service/sharddistributor/store"
@@ -86,6 +89,63 @@ func TestRecordHeartbeat(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(1), resp.Count, "Metadata key 2 should exist")
 	assert.Equal(t, "value-2", string(resp.Kvs[0].Value))
+}
+
+func TestRecordHeartbeat_NoCompression(t *testing.T) {
+	tc := testhelper.SetupStoreTestCluster(t)
+
+	var etcdCfg struct {
+		Endpoints   []string      `yaml:"endpoints"`
+		DialTimeout time.Duration `yaml:"dialTimeout"`
+		Prefix      string        `yaml:"prefix"`
+		Compression string        `yaml:"compression"`
+	}
+	require.NoError(t, tc.LeaderCfg.Store.StorageParams.Decode(&etcdCfg))
+	etcdCfg.Compression = "none"
+
+	encodedCfg, err := yaml.Marshal(etcdCfg)
+	require.NoError(t, err)
+
+	var yamlNode *config.YamlNode
+	require.NoError(t, yaml.Unmarshal(encodedCfg, &yamlNode))
+	tc.LeaderCfg.Store.StorageParams = yamlNode
+	tc.LeaderCfg.LeaderStore.StorageParams = yamlNode
+	tc.Compression = "none"
+
+	executorStore := createStore(t, tc)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	executorID := "executor-no-compression"
+	req := store.HeartbeatState{
+		LastHeartbeat: time.Now().UTC(),
+		Status:        types.ExecutorStatusACTIVE,
+		ReportedShards: map[string]*types.ShardStatusReport{
+			"shard-no-compression": {Status: types.ShardStatusREADY},
+		},
+	}
+
+	require.NoError(t, executorStore.RecordHeartbeat(ctx, tc.Namespace, executorID, req))
+
+	stateKey := etcdkeys.BuildExecutorKey(tc.EtcdPrefix, tc.Namespace, executorID, etcdkeys.ExecutorStatusKey)
+	require.NoError(t, err)
+	reportedShardsKey := etcdkeys.BuildExecutorKey(tc.EtcdPrefix, tc.Namespace, executorID, etcdkeys.ExecutorReportedShardsKey)
+	require.NoError(t, err)
+
+	stateResp, err := tc.Client.Get(ctx, stateKey)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), stateResp.Count)
+	statusJSON, err := json.Marshal(req.Status)
+	require.NoError(t, err)
+	assert.Equal(t, string(statusJSON), string(stateResp.Kvs[0].Value))
+
+	reportedResp, err := tc.Client.Get(ctx, reportedShardsKey)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), reportedResp.Count)
+	reportedJSON, err := json.Marshal(req.ReportedShards)
+	require.NoError(t, err)
+	assert.Equal(t, string(reportedJSON), string(reportedResp.Kvs[0].Value))
 }
 
 func TestGetHeartbeat(t *testing.T) {
@@ -369,7 +429,12 @@ func TestSubscribe(t *testing.T) {
 
 	// Now update the reported shards, which IS a significant change
 	reportedShardsKey := etcdkeys.BuildExecutorKey(tc.EtcdPrefix, tc.Namespace, executorID, "reported_shards")
-	_, err = tc.Client.Put(ctx, reportedShardsKey, `{"shard-1":{"status":"running"}}`)
+	require.NoError(t, err)
+	writer, err := common.NewRecordWriter(tc.Compression)
+	require.NoError(t, err)
+	compressedShards, err := writer.Write([]byte(`{"shard-1":{"status":"running"}}`))
+	require.NoError(t, err)
+	_, err = tc.Client.Put(ctx, reportedShardsKey, string(compressedShards))
 	require.NoError(t, err)
 
 	select {
@@ -589,12 +654,11 @@ func TestDeleteShardStatsDeletesLargeBatches(t *testing.T) {
 		shardID := "stale-stats-" + strconv.Itoa(i)
 		shardIDs = append(shardIDs, shardID)
 
-		statsKey, err := etcdkeys.BuildShardKey(tc.EtcdPrefix, tc.Namespace, shardID, etcdkeys.ShardStatisticsKey)
-		require.NoError(t, err)
+		statsKey := etcdkeys.BuildShardKey(tc.EtcdPrefix, tc.Namespace, shardID, etcdkeys.ShardStatisticsKey)
 		stats := store.ShardStatistics{
 			SmoothedLoad:   float64(i),
-			LastUpdateTime: int64(i),
-			LastMoveTime:   int64(i),
+			LastUpdateTime: time.Unix(int64(i), 0).UTC(),
+			LastMoveTime:   time.Unix(int64(i), 0).UTC(),
 		}
 		payload, err := json.Marshal(stats)
 		require.NoError(t, err)

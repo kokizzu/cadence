@@ -32,11 +32,12 @@ var (
 const deleteShardStatsBatchSize = 64
 
 type executorStoreImpl struct {
-	client     *clientv3.Client
-	prefix     string
-	logger     log.Logger
-	shardCache *shardcache.ShardToExecutorCache
-	timeSource clock.TimeSource
+	client       *clientv3.Client
+	prefix       string
+	logger       log.Logger
+	shardCache   *shardcache.ShardToExecutorCache
+	timeSource   clock.TimeSource
+	recordWriter *common.RecordWriter
 }
 
 // shardStatisticsUpdate holds the staged statistics for a shard so we can write them
@@ -66,6 +67,7 @@ func NewStore(p ExecutorStoreParams) (store.Store, error) {
 		Endpoints   []string      `yaml:"endpoints"`
 		DialTimeout time.Duration `yaml:"dialTimeout"`
 		Prefix      string        `yaml:"prefix"`
+		Compression string        `yaml:"compression"`
 	}
 
 	if err := p.Cfg.Store.StorageParams.Decode(&etcdCfg); err != nil {
@@ -90,12 +92,18 @@ func NewStore(p ExecutorStoreParams) (store.Store, error) {
 		timeSource = clock.NewRealTimeSource()
 	}
 
+	recordWriter, err := common.NewRecordWriter(etcdCfg.Compression)
+	if err != nil {
+		return nil, fmt.Errorf("create record writer: %w", err)
+	}
+
 	store := &executorStoreImpl{
-		client:     etcdClient,
-		prefix:     etcdCfg.Prefix,
-		logger:     p.Logger,
-		shardCache: shardCache,
-		timeSource: timeSource,
+		client:       etcdClient,
+		prefix:       etcdCfg.Prefix,
+		logger:       p.Logger,
+		shardCache:   shardCache,
+		timeSource:   timeSource,
+		recordWriter: recordWriter,
 	}
 
 	p.Lifecycle.Append(fx.StartStopHook(store.Start, store.Stop))
@@ -121,19 +129,30 @@ func (s *executorStoreImpl) RecordHeartbeat(ctx context.Context, namespace, exec
 
 	reportedShardsData, err := json.Marshal(request.ReportedShards)
 	if err != nil {
-		return fmt.Errorf("marshal assinged shards: %w", err)
+		return fmt.Errorf("marshal reported shards: %w", err)
 	}
 
 	jsonState, err := json.Marshal(request.Status)
 	if err != nil {
-		return fmt.Errorf("marshal assinged shards: %w", err)
+		return fmt.Errorf("marshal assinged state: %w", err)
+	}
+
+	// Compress data before writing to etcd
+	compressedReportedShards, err := s.recordWriter.Write(reportedShardsData)
+	if err != nil {
+		return fmt.Errorf("compress reported shards: %w", err)
+	}
+
+	compressedState, err := s.recordWriter.Write(jsonState)
+	if err != nil {
+		return fmt.Errorf("compress assigned state: %w", err)
 	}
 
 	// Build all operations including metadata
 	ops := []clientv3.Op{
 		clientv3.OpPut(heartbeatKey, etcdtypes.FormatTime(request.LastHeartbeat)),
-		clientv3.OpPut(stateKey, string(jsonState)),
-		clientv3.OpPut(reportedShardsKey, string(reportedShardsData)),
+		clientv3.OpPut(stateKey, string(compressedState)),
+		clientv3.OpPut(reportedShardsKey, string(compressedReportedShards)),
 	}
 	for key, value := range request.Metadata {
 		metadataKey := etcdkeys.BuildMetadataKey(s.prefix, namespace, executorID, key)
@@ -359,7 +378,13 @@ func (s *executorStoreImpl) AssignShards(ctx context.Context, namespace string, 
 		if err != nil {
 			return fmt.Errorf("marshal assigned shards for executor %s: %w", executorID, err)
 		}
-		ops = append(ops, clientv3.OpPut(executorStateKey, string(value)))
+
+		compressedValue, err := s.recordWriter.Write(value)
+		if err != nil {
+			return fmt.Errorf("compress assigned shards for executor %s: %w", executorID, err)
+		}
+		ops = append(ops, clientv3.OpPut(executorStateKey, string(compressedValue)))
+
 		comparisons = append(comparisons, clientv3.Compare(clientv3.ModRevision(executorStateKey), "=", state.ModRevision))
 	}
 
@@ -492,14 +517,23 @@ func (s *executorStoreImpl) AssignShard(ctx context.Context, namespace, shardID,
 			state.AssignedShards[shardID] = &types.ShardAssignment{Status: types.AssignmentStatusREADY}
 		}
 
+		// Compress new state value
 		newStateValue, err := json.Marshal(state)
 		if err != nil {
 			return fmt.Errorf("marshal new assigned state: %w", err)
+		}
+		compressedStateValue, err := s.recordWriter.Write(newStateValue)
+		if err != nil {
+			return fmt.Errorf("compress new assigned state: %w", err)
 		}
 
 		newStatsValue, err := json.Marshal(shardStats)
 		if err != nil {
 			return fmt.Errorf("marshal new shard statistics: %w", err)
+		}
+		compressedStatsValue, err := s.recordWriter.Write(newStatsValue)
+		if err != nil {
+			return fmt.Errorf("compress new shard statistics: %w", err)
 		}
 
 		var comparisons []clientv3.Cmp
@@ -529,8 +563,8 @@ func (s *executorStoreImpl) AssignShard(ctx context.Context, namespace, shardID,
 		txnResp, err := s.client.Txn(ctx).
 			If(comparisons...).
 			Then(
-				clientv3.OpPut(assignedState, string(newStateValue)),
-				clientv3.OpPut(shardStatsKey, string(newStatsValue)),
+				clientv3.OpPut(assignedState, string(compressedStateValue)),
+				clientv3.OpPut(shardStatsKey, string(compressedStatsValue)),
 			).
 			Commit()
 
