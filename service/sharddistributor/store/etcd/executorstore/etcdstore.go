@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -21,6 +20,7 @@ import (
 	"github.com/uber/cadence/service/sharddistributor/config"
 	"github.com/uber/cadence/service/sharddistributor/store"
 	"github.com/uber/cadence/service/sharddistributor/store/etcd/etcdkeys"
+	"github.com/uber/cadence/service/sharddistributor/store/etcd/etcdtypes"
 	"github.com/uber/cadence/service/sharddistributor/store/etcd/executorstore/common"
 	"github.com/uber/cadence/service/sharddistributor/store/etcd/executorstore/shardcache"
 )
@@ -42,8 +42,8 @@ type executorStoreImpl struct {
 type shardStatisticsUpdate struct {
 	key             string
 	shardID         string
-	stats           store.ShardStatistics
-	desiredLastMove int64 // intended LastMoveTime for this update
+	stats           etcdtypes.ShardStatistics
+	desiredLastMove etcdtypes.Time // intended LastMoveTime for this update
 }
 
 // ExecutorStoreParams defines the dependencies for the etcd store, for use with fx.
@@ -113,18 +113,9 @@ func (s *executorStoreImpl) Stop() {
 // --- HeartbeatStore Implementation ---
 
 func (s *executorStoreImpl) RecordHeartbeat(ctx context.Context, namespace, executorID string, request store.HeartbeatState) error {
-	heartbeatETCDKey, err := etcdkeys.BuildExecutorKey(s.prefix, namespace, executorID, etcdkeys.ExecutorHeartbeatKey)
-	if err != nil {
-		return fmt.Errorf("build executor heartbeat key: %w", err)
-	}
-	stateETCDKey, err := etcdkeys.BuildExecutorKey(s.prefix, namespace, executorID, etcdkeys.ExecutorStatusKey)
-	if err != nil {
-		return fmt.Errorf("build executor status key: %w", err)
-	}
-	reportedShardsETCDKey, err := etcdkeys.BuildExecutorKey(s.prefix, namespace, executorID, etcdkeys.ExecutorReportedShardsKey)
-	if err != nil {
-		return fmt.Errorf("build executor reported shards key: %w", err)
-	}
+	heartbeatKey := etcdkeys.BuildExecutorKey(s.prefix, namespace, executorID, etcdkeys.ExecutorHeartbeatKey)
+	stateKey := etcdkeys.BuildExecutorKey(s.prefix, namespace, executorID, etcdkeys.ExecutorStatusKey)
+	reportedShardsKey := etcdkeys.BuildExecutorKey(s.prefix, namespace, executorID, etcdkeys.ExecutorReportedShardsKey)
 
 	reportedShardsData, err := json.Marshal(request.ReportedShards)
 	if err != nil {
@@ -138,9 +129,9 @@ func (s *executorStoreImpl) RecordHeartbeat(ctx context.Context, namespace, exec
 
 	// Build all operations including metadata
 	ops := []clientv3.Op{
-		clientv3.OpPut(heartbeatETCDKey, strconv.FormatInt(request.LastHeartbeat, 10)),
-		clientv3.OpPut(stateETCDKey, string(jsonState)),
-		clientv3.OpPut(reportedShardsETCDKey, string(reportedShardsData)),
+		clientv3.OpPut(heartbeatKey, etcdtypes.FormatTime(request.LastHeartbeat)),
+		clientv3.OpPut(stateKey, string(jsonState)),
+		clientv3.OpPut(reportedShardsKey, string(reportedShardsData)),
 	}
 	for key, value := range request.Metadata {
 		metadataKey := etcdkeys.BuildMetadataKey(s.prefix, namespace, executorID, key)
@@ -159,11 +150,8 @@ func (s *executorStoreImpl) RecordHeartbeat(ctx context.Context, namespace, exec
 // GetHeartbeat retrieves the last known heartbeat state for a single executor.
 func (s *executorStoreImpl) GetHeartbeat(ctx context.Context, namespace string, executorID string) (*store.HeartbeatState, *store.AssignedState, error) {
 	// The prefix for all keys related to a single executor.
-	executorPrefix, err := etcdkeys.BuildExecutorKey(s.prefix, namespace, executorID, "")
-	if err != nil {
-		return nil, nil, fmt.Errorf("build executor prefix: %w", err)
-	}
-	resp, err := s.client.Get(ctx, executorPrefix, clientv3.WithPrefix())
+	executorIDPrefix := etcdkeys.BuildExecutorIDPrefix(s.prefix, namespace, executorID)
+	resp, err := s.client.Get(ctx, executorIDPrefix, clientv3.WithPrefix())
 	if err != nil {
 		return nil, nil, fmt.Errorf("etcd get failed for executor %s: %w", executorID, err)
 	}
@@ -173,7 +161,7 @@ func (s *executorStoreImpl) GetHeartbeat(ctx context.Context, namespace string, 
 	}
 
 	heartbeatState := &store.HeartbeatState{}
-	assignedState := &store.AssignedState{}
+	assignedState := &etcdtypes.AssignedState{}
 	found := false
 
 	for _, kv := range resp.Kvs {
@@ -187,11 +175,10 @@ func (s *executorStoreImpl) GetHeartbeat(ctx context.Context, namespace string, 
 		found = true // We found at least one valid key part for the executor.
 		switch keyType {
 		case etcdkeys.ExecutorHeartbeatKey:
-			timestamp, err := strconv.ParseInt(value, 10, 64)
+			heartbeatState.LastHeartbeat, err = etcdtypes.ParseTime(value)
 			if err != nil {
 				return nil, nil, fmt.Errorf("parse heartbeat timestamp: %w", err)
 			}
-			heartbeatState.LastHeartbeat = timestamp
 		case etcdkeys.ExecutorStatusKey:
 			if err := common.DecompressAndUnmarshal(kv.Value, &heartbeatState.Status); err != nil {
 				return nil, nil, fmt.Errorf("parse executor status: %w", err)
@@ -212,7 +199,7 @@ func (s *executorStoreImpl) GetHeartbeat(ctx context.Context, namespace string, 
 		return nil, nil, store.ErrExecutorNotFound
 	}
 
-	return heartbeatState, assignedState, nil
+	return heartbeatState, assignedState.ToAssignedState(), nil
 }
 
 // --- ShardStore Implementation ---
@@ -222,7 +209,7 @@ func (s *executorStoreImpl) GetState(ctx context.Context, namespace string) (*st
 	assignedStates := make(map[string]store.AssignedState)
 	shardStats := make(map[string]store.ShardStatistics)
 
-	executorPrefix := etcdkeys.BuildExecutorPrefix(s.prefix, namespace)
+	executorPrefix := etcdkeys.BuildExecutorsPrefix(s.prefix, namespace)
 	resp, err := s.client.Get(ctx, executorPrefix, clientv3.WithPrefix())
 	if err != nil {
 		return nil, fmt.Errorf("get executor data: %w", err)
@@ -237,10 +224,13 @@ func (s *executorStoreImpl) GetState(ctx context.Context, namespace string) (*st
 		}
 		heartbeat := heartbeatStates[executorID]
 		assigned := assignedStates[executorID]
+
 		switch keyType {
 		case etcdkeys.ExecutorHeartbeatKey:
-			timestamp, _ := strconv.ParseInt(value, 10, 64)
-			heartbeat.LastHeartbeat = timestamp
+			heartbeat.LastHeartbeat, err = etcdtypes.ParseTime(value)
+			if err != nil {
+				return nil, fmt.Errorf("parse heartbeat timestamp: %w", err)
+			}
 		case etcdkeys.ExecutorStatusKey:
 			if err := common.DecompressAndUnmarshal(kv.Value, &heartbeat.Status); err != nil {
 				return nil, fmt.Errorf("parse executor status: %w", err)
@@ -250,9 +240,11 @@ func (s *executorStoreImpl) GetState(ctx context.Context, namespace string) (*st
 				return nil, fmt.Errorf("parse reported shards: %w", err)
 			}
 		case etcdkeys.ExecutorAssignedStateKey:
-			if err := common.DecompressAndUnmarshal(kv.Value, &assigned); err != nil {
+			var assignedRaw etcdtypes.AssignedState
+			if err := common.DecompressAndUnmarshal(kv.Value, &assignedRaw); err != nil {
 				return nil, fmt.Errorf("parse assigned shards: %w, %s", err, value)
 			}
+			assigned = *assignedRaw.ToAssignedState()
 			assigned.ModRevision = kv.ModRevision
 		}
 		heartbeatStates[executorID] = heartbeat
@@ -260,8 +252,8 @@ func (s *executorStoreImpl) GetState(ctx context.Context, namespace string) (*st
 	}
 
 	// Fetch shard-level statistics stored under shard namespace keys.
-	shardPrefix := etcdkeys.BuildShardPrefix(s.prefix, namespace)
-	shardResp, err := s.client.Get(ctx, shardPrefix, clientv3.WithPrefix())
+	shardsPrefix := etcdkeys.BuildShardsPrefix(s.prefix, namespace)
+	shardResp, err := s.client.Get(ctx, shardsPrefix, clientv3.WithPrefix())
 	if err != nil {
 		return nil, fmt.Errorf("get shard data: %w", err)
 	}
@@ -273,11 +265,11 @@ func (s *executorStoreImpl) GetState(ctx context.Context, namespace string) (*st
 		if shardKeyType != etcdkeys.ShardStatisticsKey {
 			continue
 		}
-		var shardStatistic store.ShardStatistics
+		var shardStatistic etcdtypes.ShardStatistics
 		if err := common.DecompressAndUnmarshal(kv.Value, &shardStatistic); err != nil {
 			continue
 		}
-		shardStats[shardID] = shardStatistic
+		shardStats[shardID] = *shardStatistic.ToShardStatistics()
 	}
 
 	return &store.NamespaceState{
@@ -294,7 +286,7 @@ func (s *executorStoreImpl) SubscribeToAssignmentChanges(ctx context.Context, na
 
 func (s *executorStoreImpl) Subscribe(ctx context.Context, namespace string) (<-chan int64, error) {
 	revisionChan := make(chan int64, 1)
-	watchPrefix := etcdkeys.BuildExecutorPrefix(s.prefix, namespace)
+	watchPrefix := etcdkeys.BuildExecutorsPrefix(s.prefix, namespace)
 	go func() {
 		defer close(revisionChan)
 		watchChan := s.client.Watch(ctx, watchPrefix, clientv3.WithPrefix(), clientv3.WithPrevKV())
@@ -345,20 +337,14 @@ func (s *executorStoreImpl) AssignShards(ctx context.Context, namespace string, 
 	// 1. Prepare operations to delete stale executors and add comparisons to ensure they haven't been modified
 	for executorID, expectedModRevision := range request.ExecutorsToDelete {
 		// Build the assigned state key to check for concurrent modifications
-		executorStateKey, err := etcdkeys.BuildExecutorKey(s.prefix, namespace, executorID, etcdkeys.ExecutorAssignedStateKey)
-		if err != nil {
-			return fmt.Errorf("build executor assigned state key for comparison: %w", err)
-		}
+		executorStateKey := etcdkeys.BuildExecutorKey(s.prefix, namespace, executorID, etcdkeys.ExecutorAssignedStateKey)
 
 		// Add a comparison to ensure the executor's assigned state hasn't changed
 		// This prevents deleting an executor that just received a shard assignment
 		comparisons = append(comparisons, clientv3.Compare(clientv3.ModRevision(executorStateKey), "=", expectedModRevision))
 
 		// Delete all keys for this executor
-		executorPrefix, err := etcdkeys.BuildExecutorKey(s.prefix, namespace, executorID, "")
-		if err != nil {
-			return fmt.Errorf("build executor prefix key for deletion: %w", err)
-		}
+		executorPrefix := etcdkeys.BuildExecutorIDPrefix(s.prefix, namespace, executorID)
 		ops = append(ops, clientv3.OpDelete(executorPrefix, clientv3.WithPrefix()))
 	}
 
@@ -366,11 +352,8 @@ func (s *executorStoreImpl) AssignShards(ctx context.Context, namespace string, 
 	// and comparisons to check for concurrent modifications.
 	for executorID, state := range request.NewState.ShardAssignments {
 		// Update the executor's assigned_state key.
-		executorStateKey, err := etcdkeys.BuildExecutorKey(s.prefix, namespace, executorID, etcdkeys.ExecutorAssignedStateKey)
-		if err != nil {
-			return fmt.Errorf("build executor assigned state key: %w", err)
-		}
-		value, err := json.Marshal(state)
+		executorStateKey := etcdkeys.BuildExecutorKey(s.prefix, namespace, executorID, etcdkeys.ExecutorAssignedStateKey)
+		value, err := json.Marshal(etcdtypes.FromAssignedState(&state))
 		if err != nil {
 			return fmt.Errorf("marshal assigned shards for executor %s: %w", executorID, err)
 		}
@@ -432,18 +415,9 @@ func (s *executorStoreImpl) AssignShards(ctx context.Context, namespace string, 
 }
 
 func (s *executorStoreImpl) AssignShard(ctx context.Context, namespace, shardID, executorID string) error {
-	assignedState, err := etcdkeys.BuildExecutorKey(s.prefix, namespace, executorID, etcdkeys.ExecutorAssignedStateKey)
-	if err != nil {
-		return fmt.Errorf("build executor assigned state key: %w", err)
-	}
-	statusKey, err := etcdkeys.BuildExecutorKey(s.prefix, namespace, executorID, etcdkeys.ExecutorStatusKey)
-	if err != nil {
-		return fmt.Errorf("build executor status key: %w", err)
-	}
-	shardStatsKey, err := etcdkeys.BuildShardKey(s.prefix, namespace, shardID, etcdkeys.ShardStatisticsKey)
-	if err != nil {
-		return fmt.Errorf("build shard statistics key: %w", err)
-	}
+	assignedState := etcdkeys.BuildExecutorKey(s.prefix, namespace, executorID, etcdkeys.ExecutorAssignedStateKey)
+	statusKey := etcdkeys.BuildExecutorKey(s.prefix, namespace, executorID, etcdkeys.ExecutorStatusKey)
+	shardStatsKey := etcdkeys.BuildShardKey(s.prefix, namespace, shardID, etcdkeys.ShardStatisticsKey)
 
 	// Use a read-modify-write loop to handle concurrent updates safely.
 	for {
@@ -453,8 +427,8 @@ func (s *executorStoreImpl) AssignShard(ctx context.Context, namespace, shardID,
 			return fmt.Errorf("get executor assigned state: %w", err)
 		}
 
-		var state store.AssignedState
-		var shardStats store.ShardStatistics
+		var state etcdtypes.AssignedState
+		var shardStats etcdtypes.ShardStatistics
 		modRevision := int64(0) // A revision of 0 means the key doesn't exist yet.
 
 		if len(resp.Kvs) > 0 {
@@ -473,7 +447,8 @@ func (s *executorStoreImpl) AssignShard(ctx context.Context, namespace, shardID,
 		if err != nil {
 			return fmt.Errorf("get shard statistics: %w", err)
 		}
-		now := s.timeSource.Now().Unix()
+
+		now := s.timeSource.Now().UTC()
 		statsModRevision := int64(0)
 		if len(statsResp.Kvs) > 0 {
 			statsModRevision = statsResp.Kvs[0].ModRevision
@@ -483,12 +458,12 @@ func (s *executorStoreImpl) AssignShard(ctx context.Context, namespace, shardID,
 			// Statistics already exist, update the last move time.
 			// This can happen if the shard was previously assigned to an executor, and a lookup happens after the executor is deleted,
 			// AssignShard is then called to assign the shard to a new executor.
-			shardStats.LastMoveTime = now
+			shardStats.LastMoveTime = etcdtypes.Time(now)
 		} else {
 			// Statistics don't exist, initialize them.
 			shardStats.SmoothedLoad = 0
-			shardStats.LastUpdateTime = now
-			shardStats.LastMoveTime = now
+			shardStats.LastUpdateTime = etcdtypes.Time(now)
+			shardStats.LastMoveTime = etcdtypes.Time(now)
 		}
 
 		// 2. Get the executor state.
@@ -593,11 +568,8 @@ func (s *executorStoreImpl) DeleteExecutors(ctx context.Context, namespace strin
 	var ops []clientv3.Op
 
 	for _, executorID := range executorIDs {
-		executorPrefix, err := etcdkeys.BuildExecutorKey(s.prefix, namespace, executorID, "")
-		if err != nil {
-			return fmt.Errorf("build executor prefix: %w", err)
-		}
-		ops = append(ops, clientv3.OpDelete(executorPrefix, clientv3.WithPrefix()))
+		executorIDPrefix := etcdkeys.BuildExecutorIDPrefix(s.prefix, namespace, executorID)
+		ops = append(ops, clientv3.OpDelete(executorIDPrefix, clientv3.WithPrefix()))
 	}
 
 	if len(ops) == 0 {
@@ -631,10 +603,7 @@ func (s *executorStoreImpl) DeleteShardStats(ctx context.Context, namespace stri
 	}
 	var ops []clientv3.Op
 	for _, shardID := range shardIDs {
-		shardStatsKey, err := etcdkeys.BuildShardKey(s.prefix, namespace, shardID, etcdkeys.ShardStatisticsKey)
-		if err != nil {
-			return fmt.Errorf("build shard statistics key: %w", err)
-		}
+		shardStatsKey := etcdkeys.BuildShardKey(s.prefix, namespace, shardID, etcdkeys.ShardStatisticsKey)
 		ops = append(ops, clientv3.OpDelete(shardStatsKey))
 	}
 
@@ -669,7 +638,7 @@ func (s *executorStoreImpl) prepareShardStatisticsUpdates(ctx context.Context, n
 
 	for executorID, state := range newAssignments {
 		for shardID := range state.AssignedShards {
-			now := s.timeSource.Now().Unix()
+			now := s.timeSource.Now().UTC()
 
 			oldOwner, err := s.shardCache.GetShardOwner(ctx, namespace, shardID)
 			if err != nil && !errors.Is(err, store.ErrShardNotFound) {
@@ -681,17 +650,13 @@ func (s *executorStoreImpl) prepareShardStatisticsUpdates(ctx context.Context, n
 				continue
 			}
 
-			shardStatisticsKey, err := etcdkeys.BuildShardKey(s.prefix, namespace, shardID, etcdkeys.ShardStatisticsKey)
-			if err != nil {
-				return nil, fmt.Errorf("build shard statistics key: %w", err)
-			}
-
+			shardStatisticsKey := etcdkeys.BuildShardKey(s.prefix, namespace, shardID, etcdkeys.ShardStatisticsKey)
 			statsResp, err := s.client.Get(ctx, shardStatisticsKey)
 			if err != nil {
 				return nil, fmt.Errorf("get shard statistics: %w", err)
 			}
 
-			stats := store.ShardStatistics{}
+			stats := etcdtypes.ShardStatistics{}
 
 			if len(statsResp.Kvs) > 0 {
 				if err := common.DecompressAndUnmarshal(statsResp.Kvs[0].Value, &stats); err != nil {
@@ -699,14 +664,14 @@ func (s *executorStoreImpl) prepareShardStatisticsUpdates(ctx context.Context, n
 				}
 			} else {
 				stats.SmoothedLoad = 0
-				stats.LastUpdateTime = now
+				stats.LastUpdateTime = etcdtypes.Time(now)
 			}
 
 			updates = append(updates, shardStatisticsUpdate{
 				key:             shardStatisticsKey,
 				shardID:         shardID,
 				stats:           stats,
-				desiredLastMove: now,
+				desiredLastMove: etcdtypes.Time(now),
 			})
 		}
 	}
