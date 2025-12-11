@@ -21,6 +21,7 @@ import (
 )
 
 //go:generate mockgen -package $GOPACKAGE -source $GOFILE -destination interface_mock.go . ShardProcessorFactory,ShardProcessor,Executor
+//go:generate mockgen -package $GOPACKAGE -destination yarpc_client_mock.go github.com/uber/cadence/.gen/proto/sharddistributor/v1 ShardDistributorExecutorAPIYARPCClient
 
 type ExecutorMetadata map[string]string
 
