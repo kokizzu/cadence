@@ -93,7 +93,7 @@ func (sp *shardProcessorImpl) getShardLoad() float64 {
 	var load float64
 
 	// We assign a shard only based on the task list name
-	// so task lists of differt task type (decisions/activities), of different kind (normal, sticky, ephemeral) or partitions
+	// so task lists of different task type (decisions/activities), of different kind (normal, sticky, ephemeral) or partitions
 	// will be assigned all to the same matching instance (executor)
 	// we need to sum the rps for each of the tasklist to calculate the load.
 	for _, tlMgr := range sp.taskLists {

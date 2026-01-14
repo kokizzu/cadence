@@ -277,7 +277,7 @@ func (e *matchingEngineImpl) String() string {
 
 // Returns taskListManager for a task list. If not already cached gets new range from DB and
 // if successful creates one.
-func (e *matchingEngineImpl) getTaskListManager(ctx context.Context, taskList *tasklist.Identifier, taskListKind types.TaskListKind) (tasklist.Manager, error) {
+func (e *matchingEngineImpl) getOrCreateTaskListManager(ctx context.Context, taskList *tasklist.Identifier, taskListKind types.TaskListKind) (tasklist.Manager, error) {
 	// We have a shard-processor shared by all the task lists with the same name.
 	// For now there is no 1:1 mapping between shards and tasklists. (#tasklists >= #shards)
 	sp, _ := e.executor.GetShardProcess(ctx, taskList.GetName())
@@ -291,7 +291,7 @@ func (e *matchingEngineImpl) getTaskListManager(ctx context.Context, taskList *t
 		}
 		e.taskListsLock.RUnlock()
 	}
-	err := e.errIfShardLoss(ctx, taskList)
+	err := e.errIfShardOwnershipLost(ctx, taskList)
 	if err != nil {
 		return nil, err
 	}
@@ -467,7 +467,7 @@ func (e *matchingEngineImpl) AddDecisionTask(
 			tag.Dynamic("taskListBaseName", taskListID.GetRoot()))
 	}
 
-	tlMgr, err := e.getTaskListManager(hCtx.Context, taskListID, taskListKind)
+	tlMgr, err := e.getOrCreateTaskListManager(hCtx.Context, taskListID, taskListKind)
 	if err != nil {
 		return nil, err
 	}
@@ -549,7 +549,7 @@ func (e *matchingEngineImpl) AddActivityTask(
 			tag.Dynamic("taskListBaseName", taskListID.GetRoot()))
 	}
 
-	tlMgr, err := e.getTaskListManager(hCtx.Context, taskListID, taskListKind)
+	tlMgr, err := e.getOrCreateTaskListManager(hCtx.Context, taskListID, taskListKind)
 	if err != nil {
 		return nil, err
 	}
@@ -625,7 +625,7 @@ pollLoop:
 		pollerCtx := tasklist.ContextWithPollerID(hCtx.Context, pollerID)
 		pollerCtx = tasklist.ContextWithIdentity(pollerCtx, request.GetIdentity())
 		pollerCtx = tasklist.ContextWithIsolationGroup(pollerCtx, req.GetIsolationGroup())
-		tlMgr, err := e.getTaskListManager(hCtx.Context, taskListID, taskListKind)
+		tlMgr, err := e.getOrCreateTaskListManager(hCtx.Context, taskListID, taskListKind)
 		if err != nil {
 			return nil, fmt.Errorf("couldn't load tasklist manager: %w", err)
 		}
@@ -834,7 +834,7 @@ pollLoop:
 		pollerCtx = tasklist.ContextWithIdentity(pollerCtx, request.GetIdentity())
 		pollerCtx = tasklist.ContextWithIsolationGroup(pollerCtx, req.GetIsolationGroup())
 		taskListKind := request.TaskList.GetKind()
-		tlMgr, err := e.getTaskListManager(hCtx.Context, taskListID, taskListKind)
+		tlMgr, err := e.getOrCreateTaskListManager(hCtx.Context, taskListID, taskListKind)
 		if err != nil {
 			return nil, fmt.Errorf("couldn't load tasklist manager: %w", err)
 		}
@@ -862,7 +862,7 @@ pollLoop:
 		}
 
 		if task.IsStarted() {
-			// tasks received from remote are already started. So, simply forward the response
+			// task received from remote is already started. So, simply forward the response
 			resp := task.PollForActivityResponse()
 			resp.PartitionConfig = tlMgr.TaskListPartitionConfig()
 			resp.LoadBalancerHints = tlMgr.LoadBalancerHints()
@@ -985,7 +985,7 @@ func (e *matchingEngineImpl) QueryWorkflow(
 		return nil, err
 	}
 
-	tlMgr, err := e.getTaskListManager(hCtx.Context, taskListID, taskListKind)
+	tlMgr, err := e.getOrCreateTaskListManager(hCtx.Context, taskListID, taskListKind)
 	if err != nil {
 		return nil, err
 	}
@@ -1083,7 +1083,7 @@ func (e *matchingEngineImpl) CancelOutstandingPoll(
 		return err
 	}
 
-	tlMgr, err := e.getTaskListManager(hCtx.Context, taskListID, taskListKind)
+	tlMgr, err := e.getOrCreateTaskListManager(hCtx.Context, taskListID, taskListKind)
 	if err != nil {
 		return err
 	}
@@ -1109,7 +1109,7 @@ func (e *matchingEngineImpl) DescribeTaskList(
 		return nil, err
 	}
 
-	tlMgr, err := e.getTaskListManager(hCtx.Context, taskListID, taskListKind)
+	tlMgr, err := e.getOrCreateTaskListManager(hCtx.Context, taskListID, taskListKind)
 	if err != nil {
 		return nil, err
 	}
@@ -1211,7 +1211,7 @@ func (e *matchingEngineImpl) UpdateTaskListPartitionConfig(
 	if !taskListID.IsRoot() {
 		return nil, &types.BadRequestError{Message: "Only root partition's partition config can be updated."}
 	}
-	tlMgr, err := e.getTaskListManager(hCtx.Context, taskListID, taskListKind)
+	tlMgr, err := e.getOrCreateTaskListManager(hCtx.Context, taskListID, taskListKind)
 	if err != nil {
 		return nil, err
 	}
@@ -1243,7 +1243,7 @@ func (e *matchingEngineImpl) RefreshTaskListPartitionConfig(
 	if taskListID.IsRoot() && request.PartitionConfig != nil {
 		return nil, &types.BadRequestError{Message: "PartitionConfig must be nil for root partition."}
 	}
-	tlMgr, err := e.getTaskListManager(hCtx.Context, taskListID, taskListKind)
+	tlMgr, err := e.getOrCreateTaskListManager(hCtx.Context, taskListID, taskListKind)
 	if err != nil {
 		return nil, err
 	}
@@ -1295,6 +1295,7 @@ func (e *matchingEngineImpl) unloadTaskList(tlMgr tasklist.Manager) {
 	}
 	delete(e.taskLists, *id)
 	e.taskListsLock.Unlock()
+	// added a new taskList
 	tlMgr.Stop()
 }
 
@@ -1524,7 +1525,7 @@ func (e *matchingEngineImpl) emitInfoOrDebugLog(
 	}
 }
 
-func (e *matchingEngineImpl) errIfShardLoss(ctx context.Context, taskList *tasklist.Identifier) error {
+func (e *matchingEngineImpl) errIfShardOwnershipLost(ctx context.Context, taskList *tasklist.Identifier) error {
 	if !e.config.EnableTasklistOwnershipGuard() {
 		return nil
 	}
@@ -1659,7 +1660,7 @@ func (e *matchingEngineImpl) disconnectTaskListPollersAfterDomainFailover(taskLi
 	if err != nil {
 		return
 	}
-	tlMgr, err := e.getTaskListManager(context.Background(), taskList, taskListKind)
+	tlMgr, err := e.getOrCreateTaskListManager(context.Background(), taskList, taskListKind)
 	if err != nil {
 		e.logger.Error("Couldn't load tasklist manager", tag.Error(err))
 		return
