@@ -319,7 +319,7 @@ func (e *matchingEngineImpl) getTaskListManager(ctx context.Context, taskList *t
 		ClusterMetadata: e.clusterMetadata,
 		IsolationState:  e.isolationState,
 		MatchingClient:  e.matchingClient,
-		CloseCallback:   e.removeTaskListManager,
+		Registry:        e, // Engine implements ManagerRegistry
 		TaskList:        taskList,
 		TaskListKind:    taskListKind,
 		Cfg:             e.config,
@@ -388,13 +388,17 @@ func (e *matchingEngineImpl) getTaskListByDomainLocked(domainID string, taskList
 	}
 }
 
-func (e *matchingEngineImpl) removeTaskListManager(tlMgr tasklist.Manager) {
-	id := tlMgr.TaskListID()
+// UnregisterManager implements tasklist.ManagerRegistry.
+// It removes a task list manager from the engine's tracking map when the manager stops.
+func (e *matchingEngineImpl) UnregisterManager(mgr tasklist.Manager) {
+	id := mgr.TaskListID()
 	e.taskListsLock.Lock()
 	defer e.taskListsLock.Unlock()
 
+	// we need to make sure= we still hold the given `mgr` or we
+	// already created a new one.
 	currentTlMgr, ok := e.taskLists[*id]
-	if ok && currentTlMgr == tlMgr {
+	if ok && currentTlMgr == mgr {
 		delete(e.taskLists, *id)
 	}
 

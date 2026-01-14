@@ -229,20 +229,20 @@ func (s *matchingEngineSuite) TestOnlyUnloadMatchingInstance() {
 	tlm, err := s.matchingEngine.getTaskListManager(context.Background(), taskListID, tlKind)
 	s.Require().NoError(err)
 	params := tasklist.ManagerParams{
-		s.matchingEngine.domainCache,
-		s.matchingEngine.logger,
-		s.matchingEngine.metricsClient,
-		s.matchingEngine.taskManager,
-		s.matchingEngine.clusterMetadata,
-		s.matchingEngine.isolationState,
-		s.matchingEngine.matchingClient,
-		s.matchingEngine.removeTaskListManager,
-		taskListID, // same taskListID as above
-		tlKind,
-		s.matchingEngine.config,
-		s.matchingEngine.timeSource,
-		s.matchingEngine.timeSource.Now(),
-		s.matchingEngine.historyService,
+		DomainCache:     s.matchingEngine.domainCache,
+		Logger:          s.matchingEngine.logger,
+		MetricsClient:   s.matchingEngine.metricsClient,
+		TaskManager:     s.matchingEngine.taskManager,
+		ClusterMetadata: s.matchingEngine.clusterMetadata,
+		IsolationState:  s.matchingEngine.isolationState,
+		MatchingClient:  s.matchingEngine.matchingClient,
+		Registry:        s.matchingEngine, // Engine implements ManagerRegistry
+		TaskList:        taskListID,       // same taskListID as above
+		TaskListKind:    tlKind,
+		Cfg:             s.matchingEngine.config,
+		TimeSource:      s.matchingEngine.timeSource,
+		CreateTime:      s.matchingEngine.timeSource.Now(),
+		HistoryService:  s.matchingEngine.historyService,
 	}
 	tlm2, err := tasklist.NewManager(params)
 	s.Require().NoError(err)

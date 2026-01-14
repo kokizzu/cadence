@@ -94,7 +94,7 @@ type (
 		ClusterMetadata cluster.Metadata
 		IsolationState  isolationgroup.State
 		MatchingClient  matching.Client
-		CloseCallback   func(Manager)
+		Registry        ManagerRegistry // Registry that owns this manager, notified on Stop()
 		TaskList        *Identifier
 		TaskListKind    types.TaskListKind
 		Cfg             *config.Config
@@ -140,7 +140,7 @@ type (
 		stopWG        sync.WaitGroup
 		stopped       int32
 		stoppedLock   sync.RWMutex
-		closeCallback func(Manager)
+		registry      ManagerRegistry // parent registry that tracks this manager
 		throttleRetry *backoff.ThrottleRetry
 
 		qpsTracker     stats.QPSTrackerGroup
@@ -199,7 +199,7 @@ func NewManager(p ManagerParams) (Manager, error) {
 		domainName:      domainName,
 		scope:           scope,
 		timeSource:      p.TimeSource,
-		closeCallback:   p.CloseCallback,
+		registry:        p.Registry,
 		throttleRetry: backoff.NewThrottleRetry(
 			backoff.WithRetryPolicy(persistenceOperationRetryPolicy),
 			backoff.WithRetryableError(persistence.IsTransientError),
@@ -316,7 +316,10 @@ func (c *taskListManagerImpl) Stop() {
 	if !atomic.CompareAndSwapInt32(&c.stopped, 0, 1) {
 		return
 	}
-	c.closeCallback(c)
+
+	// Notify parent registry to unregister this manager
+	c.registry.UnregisterManager(c)
+
 	if c.adaptiveScaler != nil {
 		c.adaptiveScaler.Stop()
 	}
@@ -1222,8 +1225,8 @@ func validateParams(p ManagerParams) (err error) {
 	if p.MatchingClient == nil {
 		return errors.New("ManagerParams.MatchingClient is required")
 	}
-	if p.CloseCallback == nil {
-		return errors.New("ManagerParams.CloseCallback is required")
+	if p.Registry == nil {
+		return errors.New("ManagerParams.Registry is required")
 	}
 	if p.TaskList == nil {
 		return errors.New("ManagerParams.TaskList is required")
