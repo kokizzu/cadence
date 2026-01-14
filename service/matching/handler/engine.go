@@ -113,19 +113,9 @@ type (
 		failoverNotificationVersion    int64
 		ShardDistributorMatchingConfig clientcommon.Config
 	}
-
-	// HistoryInfo consists of two integer regarding the history size and history count
-	// HistoryInfo struct {
-	//	historySize  int64
-	//	historyCount int64
-	// }
 )
 
 var (
-	// EmptyPollForDecisionTaskResponse is the response when there are no decision tasks to hand out
-	emptyPollForDecisionTaskResponse = &types.MatchingPollForDecisionTaskResponse{}
-	// EmptyPollForActivityTaskResponse is the response when there are no activity tasks to hand out
-	emptyPollForActivityTaskResponse   = &types.MatchingPollForActivityTaskResponse{}
 	historyServiceOperationRetryPolicy = common.CreateHistoryServiceRetryPolicy()
 
 	errPumpClosed = errors.New("task list pump closed its channel")
