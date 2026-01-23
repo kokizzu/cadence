@@ -17,6 +17,7 @@ import (
 	"github.com/uber/cadence/common/dynamicconfig/dynamicproperties"
 	"github.com/uber/cadence/common/log/testlogger"
 	"github.com/uber/cadence/common/metrics"
+	metricmocks "github.com/uber/cadence/common/metrics/mocks"
 	"github.com/uber/cadence/common/types"
 	"github.com/uber/cadence/service/sharddistributor/config"
 	"github.com/uber/cadence/service/sharddistributor/config/configtest"
@@ -1252,6 +1253,67 @@ func TestRebalanceByShardLoad(t *testing.T) {
 
 			assert.Equal(t, tc.expectedDistributionChange, distributionChanged, "distribution change mismatch")
 			assert.Equal(t, tc.expectedAssignments, tc.currentAssignments, "final assignments mismatch")
+		})
+	}
+}
+
+func TestEmitExecutorMetric(t *testing.T) {
+	tests := []struct {
+		name           string
+		executors      map[string]store.HeartbeatState
+		expectedCounts map[types.ExecutorStatus]int
+	}{
+		{
+			name:           "empty executors",
+			executors:      map[string]store.HeartbeatState{},
+			expectedCounts: map[types.ExecutorStatus]int{},
+		},
+		{
+			name: "single active executor",
+			executors: map[string]store.HeartbeatState{
+				"exec-1": {Status: types.ExecutorStatusACTIVE},
+			},
+			expectedCounts: map[types.ExecutorStatus]int{
+				types.ExecutorStatusACTIVE: 1,
+			},
+		},
+		{
+			name: "multiple executors",
+			executors: map[string]store.HeartbeatState{
+				"exec-1": {Status: types.ExecutorStatusACTIVE},
+				"exec-2": {Status: types.ExecutorStatusACTIVE},
+				"exec-3": {Status: types.ExecutorStatusDRAINING},
+				"exec-4": {Status: types.ExecutorStatusDRAINED},
+			},
+			expectedCounts: map[types.ExecutorStatus]int{
+				types.ExecutorStatusACTIVE:   2,
+				types.ExecutorStatusDRAINING: 1,
+				types.ExecutorStatusDRAINED:  1,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mocks := setupProcessorTest(t, config.NamespaceTypeFixed)
+			defer mocks.ctrl.Finish()
+			processor := mocks.factory.CreateProcessor(mocks.cfg, mocks.store, mocks.election).(*namespaceProcessor)
+
+			namespaceState := &store.NamespaceState{
+				Executors: tt.executors,
+			}
+
+			metricsScope := &metricmocks.Scope{}
+
+			for status, count := range tt.expectedCounts {
+				taggedScope := &metricmocks.Scope{}
+				metricsScope.On("Tagged", metrics.ExecutorStatusTag(status.String())).Return(taggedScope).Once()
+				taggedScope.On("UpdateGauge", metrics.ShardDistributorTotalExecutors, float64(count)).Once()
+			}
+
+			processor.emitExecutorMetric(namespaceState, metricsScope)
+
+			metricsScope.AssertExpectations(t)
 		})
 	}
 }
