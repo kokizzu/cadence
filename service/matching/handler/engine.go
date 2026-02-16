@@ -198,19 +198,6 @@ func (e *matchingEngineImpl) setupExecutor(shardDistributorExecutorClient execut
 	}
 	e.taskListsFactory = taskListFactory
 
-	params := executorclient.Params[tasklist.ShardProcessor]{
-		ExecutorClient:        shardDistributorExecutorClient,
-		MetricsScope:          e.metricsScope,
-		Logger:                e.logger,
-		ShardProcessorFactory: taskListFactory,
-		Config:                cfg,
-		TimeSource:            e.timeSource,
-	}
-	executor, err := executorclient.NewExecutor[tasklist.ShardProcessor](params)
-	if err != nil {
-		panic(err)
-	}
-
 	// Get the IP address to advertise to external services
 	// This respects bindOnLocalHost config (127.0.0.1 for local dev, external IP for production)
 	hostIP, err := rpc.GetListenIP(e.config.RPCConfig)
@@ -218,11 +205,24 @@ func (e *matchingEngineImpl) setupExecutor(shardDistributorExecutorClient execut
 		e.logger.Fatal("Failed to get listen IP", tag.Error(err))
 	}
 
-	executor.SetMetadata(map[string]string{
-		"tchannel": fmt.Sprintf("%d", e.config.RPCConfig.Port),
-		"grpc":     fmt.Sprintf("%d", e.config.RPCConfig.GRPCPort),
-		"hostIP":   hostIP.String(),
-	})
+	params := executorclient.Params[tasklist.ShardProcessor]{
+		ExecutorClient:        shardDistributorExecutorClient,
+		MetricsScope:          e.metricsScope,
+		Logger:                e.logger,
+		ShardProcessorFactory: taskListFactory,
+		Config:                cfg,
+		TimeSource:            e.timeSource,
+		Metadata: map[string]string{
+			"tchannel": fmt.Sprintf("%d", e.config.RPCConfig.Port),
+			"grpc":     fmt.Sprintf("%d", e.config.RPCConfig.GRPCPort),
+			"hostIP":   hostIP.String(),
+		},
+	}
+	executor, err := executorclient.NewExecutor[tasklist.ShardProcessor](params)
+	if err != nil {
+		e.logger.Fatal("Failed to create new executor", tag.Error(err))
+	}
+
 	e.executor = executor
 }
 

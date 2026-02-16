@@ -138,10 +138,10 @@ func (e *executorImpl[SP]) Stop() {
 }
 
 func (e *executorImpl[SP]) GetShardProcess(ctx context.Context, shardID string) (SP, error) {
-	shardProcess, ok := e.managedProcessors.Load(shardID)
 	e.processorsToLastUse.Store(shardID, e.timeSource.Now())
-	if !ok {
 
+	shardProcess, ok := e.managedProcessors.Load(shardID)
+	if !ok {
 		if e.getMigrationMode() == types.MigrationModeLOCALPASSTHROUGH {
 			// Fail immediately if we are in LOCAL_PASSTHROUGH mode
 			var zero SP
@@ -162,6 +162,7 @@ func (e *executorImpl[SP]) GetShardProcess(ctx context.Context, shardID string) 
 			return zero, fmt.Errorf("shard process not found for shard ID: %s", shardID)
 		}
 	}
+
 	return shardProcess.processor, nil
 }
 
