@@ -478,10 +478,14 @@ $Q echo "make $1..."
 $Q output=$$(mktemp); $(MAKE) $1 > $$output 2>&1 || ( cat $$output; echo -e '\nfailed `make $1`, check output above' >&2; exit 1)
 endef
 
+override GEN_DIR := $(patsubst %/,%,$(strip $(GEN_DIR)))
+GO_GENERATE_SCOPE ?= $(if $(GEN_DIR),./$(GEN_DIR)/...,./...)
+GO_GENERATE_MAKE_ARG = $(if $(GEN_DIR),GEN_DIR=$(GEN_DIR),)
+
 # pre-PR target to build and refresh everything
-pr: ## Redo all codegen and basic checks, to ensure your PR will be able to run tests.  Recommended before opening a github PR
+pr: ## Redo all codegen and basic checks, to ensure your PR will be able to run tests. Optional: GEN_DIR=path/to/package to scope go-generate
 	$Q $(if $(verbose),$(MAKE) tidy,$(call make_quietly,tidy))
-	$Q $(if $(verbose),$(MAKE) go-generate,$(call make_quietly,go-generate))
+	$Q $(if $(verbose),$(MAKE) go-generate $(GO_GENERATE_MAKE_ARG),$(call make_quietly,go-generate $(GO_GENERATE_MAKE_ARG)))
 	$Q $(if $(verbose),$(MAKE) fmt,$(call make_quietly,fmt))
 	$Q $(if $(verbose),$(MAKE) lint,$(call make_quietly,lint))
 # 	$Q $(if $(verbose),$(MAKE) copyright,$(call make_quietly,copyright))
@@ -555,9 +559,9 @@ bins: $(BINS) ## Build all binaries, and any fast codegen needed (does not refre
 tools: $(TOOLS)
 
 go-generate: $(BIN)/mockgen $(BIN)/enumer $(BIN)/mockery  $(BIN)/gowrap ## Run `go generate` to regen mocks, enums, etc
-	$Q echo "running go generate ./..., this takes a minute or more..."
+	$Q echo "running go generate $(GO_GENERATE_SCOPE), this takes a minute or more..."
 	$Q # add our bins to PATH so `go generate` can find them
-	$Q $(BIN_PATH) go generate $(if $(verbose),-v) ./...
+	$Q $(BIN_PATH) go generate $(if $(verbose),-v) $(GO_GENERATE_SCOPE)
 	$Q $(MAKE) --no-print-directory fmt
 # 	$Q echo "updating copyright headers"
 # 	$Q $(MAKE) --no-print-directory copyright
