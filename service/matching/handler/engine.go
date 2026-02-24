@@ -1474,22 +1474,17 @@ func (e *matchingEngineImpl) errIfShardOwnershipLost(ctx context.Context, taskLi
 		return nil
 	}
 
-	// We have a shard-processor shared by all the task lists with the same name.
-	// For now there is no 1:1 mapping between shards and tasklists. (#tasklists >= #shards)
-	sp, err := e.executor.GetShardProcess(ctx, taskList.GetName())
-	if e.executor.IsOnboardedToSD() {
-		if err != nil {
-			return fmt.Errorf("failed to lookup ownership in SD: %w", err)
-		}
-		if sp == nil {
-			return fmt.Errorf("failed to lookup ownership in SD: shard process is nil")
-		}
-		return nil
-	}
-
 	self, err := e.membershipResolver.WhoAmI()
 	if err != nil {
 		return fmt.Errorf("failed to lookup self im membership: %w", err)
+	}
+
+	newNotOwnedByHostError := func(newOwner string) error {
+		return cadence_errors.NewTaskListNotOwnedByHostError(
+			newOwner,
+			self.Identity(),
+			taskList.GetName(),
+		)
 	}
 
 	if e.isShuttingDown() {
@@ -1499,11 +1494,21 @@ func (e *matchingEngineImpl) errIfShardOwnershipLost(ctx context.Context, taskLi
 			tag.WorkflowTaskListName(taskList.GetName()),
 		)
 
-		return cadence_errors.NewTaskListNotOwnedByHostError(
-			"not known",
-			self.Identity(),
-			taskList.GetName(),
-		)
+		return newNotOwnedByHostError("not known")
+	}
+
+	// We have a shard-processor shared by all the task lists with the same name.
+	// For now there is no 1:1 mapping between shards and tasklists. (#tasklists >= #shards)
+	sp, err := e.executor.GetShardProcess(ctx, taskList.GetName())
+	if e.executor.IsOnboardedToSD() {
+		if err != nil {
+			return fmt.Errorf("failed to lookup ownership in SD: %w", err)
+		}
+		if sp == nil {
+			return newNotOwnedByHostError("not known")
+		}
+
+		return nil
 	}
 
 	// Defensive check to make sure we actually own the task list
@@ -1521,11 +1526,7 @@ func (e *matchingEngineImpl) errIfShardOwnershipLost(ctx context.Context, taskLi
 			tag.WorkflowTaskListType(taskList.GetType()),
 			tag.WorkflowTaskListName(taskList.GetName()),
 		)
-		return cadence_errors.NewTaskListNotOwnedByHostError(
-			taskListOwner.Identity(),
-			self.Identity(),
-			taskList.GetName(),
-		)
+		return newNotOwnedByHostError(taskListOwner.Identity())
 	}
 
 	return nil

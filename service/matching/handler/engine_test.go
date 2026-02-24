@@ -38,6 +38,7 @@ import (
 	"github.com/uber/cadence/common/client"
 	"github.com/uber/cadence/common/clock"
 	"github.com/uber/cadence/common/dynamicconfig/dynamicproperties"
+	commonerrors "github.com/uber/cadence/common/errors"
 	"github.com/uber/cadence/common/log"
 	"github.com/uber/cadence/common/membership"
 	"github.com/uber/cadence/common/metrics"
@@ -401,6 +402,103 @@ func TestCancelOutstandingPoll(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestErrIfShardOwnershipLost(t *testing.T) {
+	taskListID := mustNewIdentifier(t, "test-domain-id", "test-tasklist", 0)
+
+	newEngine := func(t *testing.T) (*matchingEngineImpl, *executorclient.MockExecutor[tasklist.ShardProcessor], *membership.MockResolver) {
+		t.Helper()
+		ctrl := gomock.NewController(t)
+		executor := executorclient.NewMockExecutor[tasklist.ShardProcessor](ctrl)
+		resolver := membership.NewMockResolver(ctrl)
+		resolver.EXPECT().WhoAmI().Return(membership.NewDetailedHostInfo("self", "self", nil), nil).AnyTimes()
+
+		engine := &matchingEngineImpl{
+			executor:           executor,
+			membershipResolver: resolver,
+			config: &config.Config{
+				EnableTasklistOwnershipGuard: func(opts ...dynamicproperties.FilterOption) bool { return true },
+			},
+			shutdown: make(chan struct{}),
+			logger:   log.NewNoop(),
+		}
+		return engine, executor, resolver
+	}
+
+	assertTypedOwnershipErr := func(t *testing.T, err error, ownedBy, me string) {
+		t.Helper()
+		require.Error(t, err)
+		var ownershipErr *commonerrors.TaskListNotOwnedByHostError
+		require.ErrorAs(t, err, &ownershipErr)
+		assert.Equal(t, ownedBy, ownershipErr.OwnedByIdentity)
+		assert.Equal(t, me, ownershipErr.MyIdentity)
+	}
+
+	t.Run("ownership guard disabled", func(t *testing.T) {
+		engine, _, _ := newEngine(t)
+		engine.config.EnableTasklistOwnershipGuard = func(opts ...dynamicproperties.FilterOption) bool { return false }
+		err := engine.errIfShardOwnershipLost(context.Background(), taskListID)
+		require.NoError(t, err)
+	})
+
+	t.Run("onboarded to sd with shard process error", func(t *testing.T) {
+		engine, executor, _ := newEngine(t)
+		executor.EXPECT().GetShardProcess(gomock.Any(), gomock.Any()).Return(nil, errors.New("sd lookup failed"))
+		executor.EXPECT().IsOnboardedToSD().Return(true)
+
+		err := engine.errIfShardOwnershipLost(context.Background(), taskListID)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "failed to lookup ownership in SD")
+	})
+
+	t.Run("onboarded to sd and shard no longer owned", func(t *testing.T) {
+		engine, executor, _ := newEngine(t)
+		executor.EXPECT().GetShardProcess(gomock.Any(), gomock.Any()).Return(nil, nil)
+		executor.EXPECT().IsOnboardedToSD().Return(true)
+
+		err := engine.errIfShardOwnershipLost(context.Background(), taskListID)
+		assertTypedOwnershipErr(t, err, "not known", "self")
+	})
+
+	t.Run("onboarded to sd and shard and is still owned by this host", func(t *testing.T) {
+		engine, executor, _ := newEngine(t)
+		executor.EXPECT().GetShardProcess(gomock.Any(), gomock.Any()).
+			Return(&tasklist.MockShardProcessor{}, nil). // not nil being returned because the shard is still owned by this host
+			AnyTimes()
+		executor.EXPECT().IsOnboardedToSD().Return(true)
+
+		err := engine.errIfShardOwnershipLost(context.Background(), taskListID)
+		require.NoError(t, err)
+	})
+
+	t.Run("matching engine is shutting down", func(t *testing.T) {
+		engine, _, _ := newEngine(t)
+		close(engine.shutdown)
+
+		err := engine.errIfShardOwnershipLost(context.Background(), taskListID)
+		assertTypedOwnershipErr(t, err, "not known", "self")
+	})
+
+	t.Run("ringpop and owner has changed", func(t *testing.T) {
+		engine, executor, resolver := newEngine(t)
+		executor.EXPECT().GetShardProcess(gomock.Any(), gomock.Any()).Return(nil, nil)
+		executor.EXPECT().IsOnboardedToSD().Return(false)
+		resolver.EXPECT().Lookup(service.Matching, taskListID.GetName()).Return(membership.NewDetailedHostInfo("owner", "owner", nil), nil)
+
+		err := engine.errIfShardOwnershipLost(context.Background(), taskListID)
+		assertTypedOwnershipErr(t, err, "owner", "self")
+	})
+
+	t.Run("ringpop and owner is the same", func(t *testing.T) {
+		engine, executor, resolver := newEngine(t)
+		executor.EXPECT().GetShardProcess(gomock.Any(), gomock.Any()).Return(nil, nil)
+		executor.EXPECT().IsOnboardedToSD().Return(false)
+		resolver.EXPECT().Lookup(service.Matching, taskListID.GetName()).Return(membership.NewDetailedHostInfo("self", "self", nil), nil)
+
+		err := engine.errIfShardOwnershipLost(context.Background(), taskListID)
+		require.NoError(t, err)
+	})
 }
 
 func TestRespondQueryTaskCompleted(t *testing.T) {
