@@ -2484,6 +2484,7 @@ const (
 const (
 	TaskRequests = iota + NumCommonMetrics
 	TaskLatency
+	ExponentialTaskLatency
 	TaskFailures
 	TaskDiscarded
 	TaskAttemptTimer
@@ -2739,10 +2740,14 @@ const (
 	ReplicationTasksLag
 	ExponentialReplicationTasksLag
 	ReplicationTasksLagRaw
+	ExponentialReplicationTasksLagRaw
 	ReplicationTasksDelay
 	ReplicationTasksFetched
+	ExponentialReplicationTasksFetched
 	ReplicationTasksReturned
+	ExponentialReplicationTasksReturned
 	ReplicationTasksReturnedDiff
+	ExponentialReplicationTasksReturnedDiff
 	ReplicationTasksAppliedLatency
 	ExponentialReplicationTasksAppliedLatency
 	ReplicationTasksBatchSize
@@ -3326,6 +3331,7 @@ var MetricDefs = map[ServiceIdx]map[MetricIdx]metricDefinition{
 	History: {
 		TaskRequests:                                  {metricName: "task_requests", metricType: Counter},
 		TaskLatency:                                   {metricName: "task_latency", metricType: Timer},
+		ExponentialTaskLatency:                        {metricName: "task_latency_ns", metricType: Histogram, exponentialBuckets: Low1ms100s},
 		TaskAttemptTimer:                              {metricName: "task_attempt", metricType: Timer},
 		ExponentialTaskAttemptCounts:                  {metricName: "task_attempt_counts", metricType: Histogram, intExponentialBuckets: Mid1To16k},
 		TaskFailures:                                  {metricName: "task_errors", metricType: Counter},
@@ -3568,10 +3574,14 @@ var MetricDefs = map[ServiceIdx]map[MetricIdx]metricDefinition{
 		ReplicationTasksLag:                                          {metricName: "replication_tasks_lag", metricType: Timer},
 		ExponentialReplicationTasksLag:                               {metricName: "replication_tasks_lag_counts", metricType: Histogram, intExponentialBuckets: Mid1To16k},
 		ReplicationTasksLagRaw:                                       {metricName: "replication_tasks_lag_raw", metricType: Timer},
+		ExponentialReplicationTasksLagRaw:                            {metricName: "replication_tasks_lag_raw_counts", metricType: Histogram, intExponentialBuckets: Mid1To16k},
 		ReplicationTasksDelay:                                        {metricName: "replication_tasks_delay", metricType: Histogram, buckets: ReplicationTaskDelayBucket},
 		ReplicationTasksFetched:                                      {metricName: "replication_tasks_fetched", metricType: Timer},
+		ExponentialReplicationTasksFetched:                           {metricName: "replication_tasks_fetched_counts", metricType: Histogram, intExponentialBuckets: Mid1To16k},
 		ReplicationTasksReturned:                                     {metricName: "replication_tasks_returned", metricType: Timer},
+		ExponentialReplicationTasksReturned:                          {metricName: "replication_tasks_returned_counts", metricType: Histogram, intExponentialBuckets: Mid1To16k},
 		ReplicationTasksReturnedDiff:                                 {metricName: "replication_tasks_returned_diff", metricType: Timer},
+		ExponentialReplicationTasksReturnedDiff:                      {metricName: "replication_tasks_returned_diff_counts", metricType: Histogram, intExponentialBuckets: Mid1To16k},
 		ReplicationTasksAppliedLatency:                               {metricName: "replication_tasks_applied_latency", metricType: Timer},
 		ExponentialReplicationTasksAppliedLatency:                    {metricName: "replication_tasks_applied_latency_ns", metricType: Histogram, exponentialBuckets: Low1ms100s},
 		ReplicationTasksBatchSize:                                    {metricName: "replication_tasks_batch_size", metricType: Gauge},
