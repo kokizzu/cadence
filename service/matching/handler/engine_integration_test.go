@@ -194,6 +194,7 @@ func (s *matchingEngineSuite) newMatchingEngine(
 		s.mockTimeSource,
 		s.mockShardExecutorClient,
 		defaultSDExecutorConfig(),
+		nil,
 	).(*matchingEngineImpl)
 }
 

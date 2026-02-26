@@ -111,6 +111,7 @@ type (
 		timeSource                     clock.TimeSource
 		failoverNotificationVersion    int64
 		ShardDistributorMatchingConfig clientcommon.Config
+		drainObserver                  clientcommon.DrainSignalObserver
 	}
 )
 
@@ -140,6 +141,7 @@ func NewEngine(
 	timeSource clock.TimeSource,
 	shardDistributorClient executorclient.Client,
 	ShardDistributorMatchingConfig clientcommon.Config,
+	drainObserver clientcommon.DrainSignalObserver,
 ) Engine {
 	e := &matchingEngineImpl{
 		taskListRegistry:               tasklist.NewTaskListRegistry(metricsClient),
@@ -161,6 +163,7 @@ func NewEngine(
 		isolationState:                 isolationState,
 		timeSource:                     timeSource,
 		ShardDistributorMatchingConfig: ShardDistributorMatchingConfig,
+		drainObserver:                  drainObserver,
 	}
 
 	e.setupExecutor(shardDistributorClient)
@@ -215,6 +218,7 @@ func (e *matchingEngineImpl) setupExecutor(shardDistributorExecutorClient execut
 			"grpc":     fmt.Sprintf("%d", e.config.RPCConfig.GRPCPort),
 			"hostIP":   hostIP.String(),
 		},
+		DrainObserver: e.drainObserver,
 	}
 	executor, err := executorclient.NewExecutor[tasklist.ShardProcessor](params)
 	if err != nil {
