@@ -56,12 +56,15 @@ var HistogramMigrationMetrics = map[string]struct{}{
 	"task_latency_queue_per_domain":         {},
 	"task_latency_queue_per_domain_ns":      {},
 
-	// Replication task processor histograms (PR #7685).
-	// Dual-emitted as timer + histogram.
 	"replication_tasks_lag":                {},
 	"replication_tasks_lag_counts":         {},
 	"replication_tasks_applied_latency":    {},
 	"replication_tasks_applied_latency_ns": {},
+
+	"cache_latency":     {},
+	"cache_latency_ns":  {},
+	"cache_size":        {},
+	"cache_size_counts": {},
 
 	"replication_task_latency":    {},
 	"replication_task_latency_ns": {},
