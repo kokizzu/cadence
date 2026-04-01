@@ -17,6 +17,7 @@ import (
 	gomock "go.uber.org/mock/gomock"
 
 	cache "github.com/uber/cadence/common/cache"
+	checksum "github.com/uber/cadence/common/checksum"
 	definition "github.com/uber/cadence/common/definition"
 	persistence "github.com/uber/cadence/common/persistence"
 	types "github.com/uber/cadence/common/types"
@@ -1067,6 +1068,20 @@ func (mr *MockMutableStateMockRecorder) GetActivityScheduledEvent(arg0, arg1 any
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetActivityScheduledEvent", reflect.TypeOf((*MockMutableState)(nil).GetActivityScheduledEvent), arg0, arg1)
 }
 
+// GetChecksum mocks base method.
+func (m *MockMutableState) GetChecksum() checksum.Checksum {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetChecksum")
+	ret0, _ := ret[0].(checksum.Checksum)
+	return ret0
+}
+
+// GetChecksum indicates an expected call of GetChecksum.
+func (mr *MockMutableStateMockRecorder) GetChecksum() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetChecksum", reflect.TypeOf((*MockMutableState)(nil).GetChecksum))
+}
+
 // GetChildExecutionInfo mocks base method.
 func (m *MockMutableState) GetChildExecutionInfo(arg0 int64) (*persistence.ChildExecutionInfo, bool) {
 	m.ctrl.T.Helper()
@@ -1771,11 +1786,9 @@ func (mr *MockMutableStateMockRecorder) IsWorkflowExecutionRunning() *gomock.Cal
 }
 
 // Load mocks base method.
-func (m *MockMutableState) Load(arg0 context.Context, arg1 *persistence.WorkflowMutableState) error {
+func (m *MockMutableState) Load(arg0 context.Context, arg1 *persistence.WorkflowMutableState) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Load", arg0, arg1)
-	ret0, _ := ret[0].(error)
-	return ret0
+	m.ctrl.Call(m, "Load", arg0, arg1)
 }
 
 // Load indicates an expected call of Load.

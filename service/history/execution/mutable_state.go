@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/uber/cadence/common/cache"
+	"github.com/uber/cadence/common/checksum"
 	"github.com/uber/cadence/common/definition"
 	"github.com/uber/cadence/common/persistence"
 	"github.com/uber/cadence/common/types"
@@ -167,7 +168,7 @@ type (
 		IsWorkflowCompleted() bool
 		IsResourceDuplicated(resourceDedupKey definition.DeduplicationID) bool
 		UpdateDuplicatedResource(resourceDedupKey definition.DeduplicationID)
-		Load(context.Context, *persistence.WorkflowMutableState) error
+		Load(context.Context, *persistence.WorkflowMutableState)
 		ReplicateActivityInfo(*types.SyncActivityRequest, bool) error
 		ReplicateActivityTaskCancelRequestedEvent(*types.HistoryEvent) error
 		ReplicateActivityTaskCanceledEvent(*types.HistoryEvent) error
@@ -236,6 +237,8 @@ type (
 
 		GetHistorySize() int64
 		SetHistorySize(size int64)
+
+		GetChecksum() checksum.Checksum
 
 		cache.Sizeable
 	}
