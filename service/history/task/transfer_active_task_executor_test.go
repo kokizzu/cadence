@@ -2022,7 +2022,7 @@ func (s *transferActiveTaskExecutorSuite) TestProcessResetWorkflow_WorkflowNotRu
 	persistenceMutableState, err := test.CreatePersistenceMutableState(s.T(), mutableState, decisionCompletionID, mutableState.GetCurrentVersion())
 	s.NoError(err)
 	s.mockExecutionMgr.On("GetWorkflowExecution", mock.Anything, mock.Anything).Return(&persistence.GetWorkflowExecutionResponse{State: persistenceMutableState}, nil)
-	s.mockExecutionMgr.On("GetCurrentExecution", mock.Anything, &persistence.GetCurrentExecutionRequest{DomainID: s.domainID, WorkflowID: workflowExecution.GetWorkflowID(), DomainName: s.domainName}).
+	s.mockExecutionMgr.On("GetCurrentExecution", mock.Anything, &persistence.GetCurrentExecutionRequest{DomainID: s.domainID, WorkflowID: workflowExecution.GetWorkflowID(), DomainName: s.domainName, ShardID: common.Ptr(0)}).
 		Return(&persistence.GetCurrentExecutionResponse{RunID: "runID"}, nil)
 
 	_, err = s.transferActiveTaskExecutor.Execute(transferTask)
