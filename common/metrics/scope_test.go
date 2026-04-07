@@ -221,25 +221,25 @@ func TestHistogramMode(t *testing.T) {
 	})
 
 	HistogramMigrationMetrics = map[string]struct{}{
-		findName(CadenceLatency):                            {},
-		findName(ExponentialReplicationTaskLatency):         {},
-		findName(PersistenceLatencyPerShard):                {},
-		findName(ExponentialTaskProcessingLatency):          {},
-		findName(PersistenceLatency):                        {},
-		findName(PersistenceLatencyHistogram):               {},
-		findName(PersistenceLatencyHistogramPerHost):        {},
-		findName(TaskAttemptTimer):                          {},
-		findName(ExponentialTaskAttemptCounts):              {},
-		findName(TaskQueueLatency):                          {},
-		findName(ExponentialTaskQueueLatency):               {},
-		findName(TaskLatencyPerDomain):                      {},
-		findName(ExponentialTaskLatencyPerDomain):           {},
-		findName(TaskAttemptTimerPerDomain):                 {},
-		findName(ExponentialTaskAttemptCountsPerDomain):     {},
-		findName(TaskProcessingLatencyPerDomain):            {},
-		findName(ExponentialTaskProcessingLatencyPerDomain): {},
-		findName(TaskQueueLatencyPerDomain):                 {},
-		findName(ExponentialTaskQueueLatencyPerDomain):      {},
+		findName(CadenceLatency):                          {},
+		findName(ExponentialReplicationTaskLatency):       {},
+		findName(PersistenceLatencyPerShard):              {},
+		findName(TaskProcessingLatencyHistogram):          {},
+		findName(PersistenceLatency):                      {},
+		findName(PersistenceLatencyHistogram):             {},
+		findName(PersistenceLatencyHistogramPerHost):      {},
+		findName(TaskAttemptTimer):                        {},
+		findName(TaskAttemptCountsHistogram):              {},
+		findName(TaskQueueLatency):                        {},
+		findName(TaskQueueLatencyHistogram):               {},
+		findName(TaskLatencyPerDomain):                    {},
+		findName(TaskLatencyPerDomainHistogram):           {},
+		findName(TaskAttemptTimerPerDomain):               {},
+		findName(TaskAttemptPerDomainCountsHistogram):     {},
+		findName(TaskProcessingLatencyPerDomain):          {},
+		findName(TaskProcessingLatencyPerDomainHistogram): {},
+		findName(TaskQueueLatencyPerDomain):               {},
+		findName(TaskQueueLatencyPerDomainHistogram):      {},
 	}
 
 	c := NewClient(ts, History, MigrationConfig{
@@ -249,8 +249,8 @@ func TestHistogramMode(t *testing.T) {
 				findName(CadenceLatency):                    true,  // timer type
 				findName(ExponentialReplicationTaskLatency): false, // histogram type
 
-				findName(PersistenceLatencyPerShard):       false, // timer type
-				findName(ExponentialTaskProcessingLatency): true,  // histogram type
+				findName(PersistenceLatencyPerShard):     false, // timer type
+				findName(TaskProcessingLatencyHistogram): true,  // histogram type
 			},
 		},
 	})
@@ -260,7 +260,7 @@ func TestHistogramMode(t *testing.T) {
 	scope.ExponentialHistogram(ExponentialReplicationTaskLatency, 2*time.Second)
 
 	scope.RecordTimer(PersistenceLatencyPerShard, 3*time.Second)
-	scope.ExponentialHistogram(ExponentialTaskProcessingLatency, 4*time.Second)
+	scope.ExponentialHistogram(TaskProcessingLatencyHistogram, 4*time.Second)
 
 	// unspecified -> default config
 	scope.RecordTimer(PersistenceLatency, 5*time.Second)
@@ -313,7 +313,7 @@ func TestHistogramMode(t *testing.T) {
 	assertFound(ExponentialReplicationTaskLatency, false, false)
 	// only the histogram
 	assertFound(PersistenceLatencyPerShard, false, false)
-	assertFound(ExponentialTaskProcessingLatency, false, true)
+	assertFound(TaskProcessingLatencyHistogram, false, true)
 	// timers only (via default)
 	assertFound(PersistenceLatency, true, false)
 	assertFound(PersistenceLatencyHistogram, false, false)
