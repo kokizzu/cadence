@@ -342,7 +342,7 @@ func (c *taskListManagerImpl) handleErr(err error) error {
 		// This indicates the task list may have moved to another host.
 		c.scope.IncCounter(metrics.ConditionFailedErrorPerTaskListCounter)
 		c.logger.Info("Stopping task list due to persistence condition failure.", tag.Error(err))
-		c.Stop()
+		go c.Stop()
 		if c.taskListKind == types.TaskListKindSticky {
 			// TODO: we don't see this error in our logs, we might be able to remove this error
 			err = &types.InternalServiceError{Message: constants.StickyTaskConditionFailedErrorMsg}
