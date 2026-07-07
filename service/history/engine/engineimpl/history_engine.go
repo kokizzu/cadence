@@ -295,16 +295,12 @@ func NewEngineWithShardContext(
 	replicationMessageHandler := replication.NewDLQHandler(shard, replicationTaskExecutors)
 	historyEngImpl.replicationDLQHandler = replicationMessageHandler
 
-	historyEngImpl.dlqProcessor = taskdlq.NewProcessor(
-		shard.GetShardID(),
-		shard.GetService().GetHistoryTaskDLQManager(),
-		map[int]taskdlq.TaskExecutor{},
+	historyEngImpl.dlqProcessor = taskdlq.NewProcessorFromShard(
+		shard,
 		100,
 		config.HistoryTaskDLQProcessorInterval,
 		config.HistoryTaskDLQMode,
 		config.HistoryTaskDLQProcessorEnabled,
-		shard.GetTimeSource(),
-		logger,
 	)
 
 	shard.SetEngine(historyEngImpl)

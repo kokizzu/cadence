@@ -69,20 +69,25 @@ func (m *historyTaskDLQManagerImpl) CreateHistoryDLQTask(
 	if err != nil {
 		return fmt.Errorf("failed to serialize history DLQ task: %w", err)
 	}
-	return m.persistence.CreateHistoryDLQTask(ctx, InternalCreateHistoryDLQTaskRequest{
+	// Use the task's key to store the visibility_ts/task_id in the DLQ.
+	taskKey := request.Task.GetTaskKey()
+
+	createHistoryDLQTaskRequest := InternalCreateHistoryDLQTaskRequest{
 		ShardID:               request.ShardID,
 		DomainID:              request.DomainID,
 		ClusterAttributeScope: request.ClusterAttributeScope,
 		ClusterAttributeName:  request.ClusterAttributeName,
-		TaskType:              request.Task.GetTaskType(),
-		TaskID:                request.Task.GetTaskID(),
+		TaskCategory:          request.Task.GetTaskCategory().ID(),
+		TaskID:                taskKey.GetTaskID(),
 		WorkflowID:            request.Task.GetWorkflowID(),
 		RunID:                 request.Task.GetRunID(),
 		Version:               request.Task.GetVersion(),
-		VisibilityTimestamp:   request.Task.GetVisibilityTimestamp(),
+		VisibilityTimestamp:   taskKey.GetScheduledTime(),
 		CreatedAt:             m.timeSrc.Now().UTC(),
 		TaskBlob:              &DataBlob{Data: blob.Data, Encoding: blob.Encoding},
-	})
+	}
+
+	return m.persistence.CreateHistoryDLQTask(ctx, createHistoryDLQTaskRequest)
 }
 
 // GetHistoryDLQAckLevels returns DLQ partitions for the given shard and task category with their stored ack levels.
@@ -134,14 +139,16 @@ func (m *historyTaskDLQManagerImpl) GetHistoryDLQTasks(
 	}
 
 	tasks := make([]Task, 0, len(resp.Tasks))
+	pageSizeBytes := 0
 	for _, raw := range resp.Tasks {
+		pageSizeBytes += len(raw.TaskPayload.GetData())
 		task, err := m.taskSerializer.DeserializeTask(request.TaskCategory, raw.TaskPayload)
 		if err != nil {
 			return HistoryDLQGetTasksResponse{}, fmt.Errorf("failed to deserialize history DLQ task: %w", err)
 		}
 		tasks = append(tasks, task)
 	}
-	return HistoryDLQGetTasksResponse{Tasks: tasks, NextPageToken: resp.NextPageToken}, nil
+	return HistoryDLQGetTasksResponse{Tasks: tasks, NextPageToken: resp.NextPageToken, PageSizeBytes: pageSizeBytes}, nil
 }
 
 // UpdateHistoryDLQAckLevel persists the new ack level for a partition.

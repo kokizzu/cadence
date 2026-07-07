@@ -75,6 +75,7 @@ func TestHistoryTaskDLQManager_CreateHistoryDLQTask(t *testing.T) {
 						assert.Equal(t, "test-domain", req.DomainID)
 						assert.Equal(t, "scope", req.ClusterAttributeScope)
 						assert.Equal(t, "cluster-a", req.ClusterAttributeName)
+						assert.Equal(t, HistoryTaskCategoryIDTransfer, req.TaskCategory)
 						assert.Equal(t, int64(42), req.TaskID)
 						assert.Equal(t, now, req.CreatedAt)
 						assert.Equal(t, serializedBlob.Data, req.TaskBlob.Data)
@@ -323,11 +324,12 @@ func TestHistoryTaskDLQManager_GetHistoryDLQTasks(t *testing.T) {
 	deserializedTask := &ActivityTask{TaskData: TaskData{TaskID: 15}}
 
 	tests := []struct {
-		name      string
-		request   HistoryDLQGetTasksRequest
-		mockSetup func(*MockHistoryDLQTaskStore, *MockHistoryTaskSerializer)
-		wantTasks []Task
-		wantErr   string
+		name              string
+		request           HistoryDLQGetTasksRequest
+		mockSetup         func(*MockHistoryDLQTaskStore, *MockHistoryTaskSerializer)
+		wantTasks         []Task
+		wantPageSizeBytes int
+		wantErr           string
 	}{
 		{
 			name: "converts keys and deserializes tasks",
@@ -357,7 +359,8 @@ func TestHistoryTaskDLQManager_GetHistoryDLQTasks(t *testing.T) {
 					DeserializeTask(HistoryTaskCategoryTransfer, taskBlob).
 					Return(deserializedTask, nil)
 			},
-			wantTasks: []Task{deserializedTask},
+			wantTasks:         []Task{deserializedTask},
+			wantPageSizeBytes: len(taskBlob.Data),
 		},
 		{
 			name: "deserialization error surfaces",
@@ -405,6 +408,7 @@ func TestHistoryTaskDLQManager_GetHistoryDLQTasks(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				assert.Equal(t, tc.wantTasks, resp.Tasks)
+				assert.Equal(t, tc.wantPageSizeBytes, resp.PageSizeBytes)
 			}
 		})
 	}

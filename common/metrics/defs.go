@@ -1465,6 +1465,8 @@ const (
 	HistoryTaskSchedulerMigrationScope
 	// WorkflowCorruptionRepairScope is the scope used for workflow corruption detection and repair operations
 	WorkflowCorruptionRepairScope
+	// HistoryTaskDLQProcessorScope is the scope used by the history task DLQ re-injection processor
+	HistoryTaskDLQProcessorScope
 	NumHistoryScopes
 )
 
@@ -2218,6 +2220,7 @@ var ScopeDefs = map[ServiceIdx]map[ScopeIdx]scopeDefinition{
 		HistoryFlushBufferedEventsScope:                                 {operation: "HistoryFlushBufferedEvents"},
 		HistoryTaskSchedulerMigrationScope:                              {operation: "HistoryTaskSchedulerMigration"},
 		WorkflowCorruptionRepairScope:                                   {operation: "WorkflowCorruptionRepair"},
+		HistoryTaskDLQProcessorScope:                                    {operation: "HistoryTaskDLQProcessor"},
 	},
 	// Matching Scope Names
 	Matching: {
@@ -2992,6 +2995,11 @@ const (
 	TaskScheduleSubmittedPerTaskList
 	TaskScheduleThrottledPerTaskList
 
+	// HistoryTaskDLQReinjectFailuresCounter counts DLQ page re-injection failures (alert on this)
+	HistoryTaskDLQReinjectFailuresCounter
+	// HistoryTaskDLQPageSizeBytes tracks the serialized byte size of each re-injected DLQ page
+	HistoryTaskDLQPageSizeBytes
+
 	NumHistoryMetrics
 )
 
@@ -3635,6 +3643,9 @@ var MetricDefs = map[ServiceIdx]map[MetricIdx]metricDefinition{
 		TaskScheduleLatencyPerTaskListHistogram:   {metricName: "task_latency_schedule_per_task_list_ns", metricType: Histogram, exponentialBuckets: High1ms24h},
 		TaskScheduleSubmittedPerTaskList:          {metricName: "task_schedule_submitted_per_task_list", metricType: Counter},
 		TaskScheduleThrottledPerTaskList:          {metricName: "task_schedule_throttled_per_task_list", metricType: Counter},
+
+		HistoryTaskDLQReinjectFailuresCounter: {metricName: "history_task_dlq_reinject_failures", metricType: Counter},
+		HistoryTaskDLQPageSizeBytes:           {metricName: "history_task_dlq_page_size_bytes", metricType: Histogram, buckets: ResponsePayloadSizeBuckets},
 
 		TaskBatchCompleteCounter:                                      {metricName: "task_batch_complete_counter", metricType: Counter},
 		TaskBatchCompleteFailure:                                      {metricName: "task_batch_complete_error", metricType: Counter},
