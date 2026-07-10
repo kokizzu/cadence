@@ -69,6 +69,9 @@ func (m *historyTaskDLQManagerImpl) CreateHistoryDLQTask(
 	if err != nil {
 		return fmt.Errorf("failed to serialize history DLQ task: %w", err)
 	}
+
+	taskCategoryID := request.Task.GetTaskCategory().ID()
+
 	// Use the task's key to store the visibility_ts/task_id in the DLQ.
 	taskKey := request.Task.GetTaskKey()
 
@@ -77,7 +80,7 @@ func (m *historyTaskDLQManagerImpl) CreateHistoryDLQTask(
 		DomainID:              request.DomainID,
 		ClusterAttributeScope: request.ClusterAttributeScope,
 		ClusterAttributeName:  request.ClusterAttributeName,
-		TaskCategory:          request.Task.GetTaskCategory().ID(),
+		TaskCategory:          taskCategoryID,
 		TaskID:                taskKey.GetTaskID(),
 		WorkflowID:            request.Task.GetWorkflowID(),
 		RunID:                 request.Task.GetRunID(),
@@ -88,6 +91,24 @@ func (m *historyTaskDLQManagerImpl) CreateHistoryDLQTask(
 	}
 
 	return m.persistence.CreateHistoryDLQTask(ctx, createHistoryDLQTaskRequest)
+}
+
+// CreateHistoryDLQAckLevelIfNotExists seeds the sentinel ack-level row for a DLQ partition/task
+// category when one does not already exist.
+func (m *historyTaskDLQManagerImpl) CreateHistoryDLQAckLevelIfNotExists(
+	ctx context.Context,
+	request CreateHistoryDLQAckLevelRequest,
+) error {
+	return m.persistence.CreateHistoryDLQAckLevelIfNotExists(ctx, InternalHistoryDLQAckLevel{
+		ShardID:               request.ShardID,
+		DomainID:              request.DomainID,
+		ClusterAttributeScope: request.ClusterAttributeScope,
+		ClusterAttributeName:  request.ClusterAttributeName,
+		TaskCategory:          request.TaskCategory.ID(),
+		AckLevelVisibilityTS:  MinimumHistoryTaskKey.GetScheduledTime(),
+		AckLevelTaskID:        MinimumHistoryTaskKey.GetTaskID(),
+		LastUpdatedAt:         m.timeSrc.Now().UTC(),
+	})
 }
 
 // GetHistoryDLQAckLevels returns DLQ partitions for the given shard and task category with their stored ack levels.
