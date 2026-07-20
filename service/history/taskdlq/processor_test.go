@@ -701,3 +701,194 @@ func TestProcessShard_WhenDomainNotEnabled_SkipsProcessing(t *testing.T) {
 
 	assert.NoError(t, proc.ProcessShard(context.Background()))
 }
+
+func TestFailoverPartitions_DispatchesToProcessPartition(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mgr := persistence.NewMockHistoryTaskDLQManager(ctrl)
+	processed := make(chan persistence.HistoryDLQGetAckLevelsRequest, 1)
+	mgr.EXPECT().GetHistoryDLQAckLevels(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, req persistence.HistoryDLQGetAckLevelsRequest) ([]persistence.HistoryDLQAckLevel, error) {
+			select {
+			case processed <- req:
+			default:
+			}
+			return nil, nil
+		}).AnyTimes()
+
+	proc := newProcessor(t, newProcessorParams{
+		Manager:           mgr,
+		Reinjector:        NewMockTaskReinjector(ctrl),
+		DomainMode:        constants.HistoryTaskDLQModeEnabled,
+		ProcessingEnabled: true,
+		TimeSource:        clock.NewMockedTimeSource(),
+	})
+	proc.Start()
+	defer proc.Stop()
+
+	proc.FailoverPartitions([]Partition{{
+		DomainID:              "test-domain",
+		ClusterAttributeScope: "scope",
+		ClusterAttributeName:  "name",
+	}})
+
+	select {
+	case req := <-processed:
+		// The partition keys must be passed through verbatim so the store issues a
+		// by-cluster-attribute query for exactly this partition.
+		assert.Equal(t, persistence.HistoryDLQGetAckLevelsRequest{
+			ShardID:               1,
+			DomainID:              "test-domain",
+			ClusterAttributeScope: "scope",
+			ClusterAttributeName:  "name",
+		}, req)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for FailoverPartitions to trigger ProcessPartition")
+	}
+}
+
+func TestFailoverPartitions_DedupsAndNeverBlocks(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	// Not started: nothing drains the pending set, so we can inspect it directly and confirm
+	// FailoverPartitions never blocks no matter how many partitions are queued.
+	proc := newProcessor(t, newProcessorParams{
+		Manager:           persistence.NewMockHistoryTaskDLQManager(ctrl),
+		Reinjector:        NewMockTaskReinjector(ctrl),
+		DomainMode:        constants.HistoryTaskDLQModeEnabled,
+		ProcessingEnabled: true,
+		TimeSource:        clock.NewMockedTimeSource(),
+	})
+
+	dup := Partition{DomainID: "test-domain", ClusterAttributeScope: "scope", ClusterAttributeName: "name"}
+	other := Partition{DomainID: "other-domain"}
+	partitions := make([]Partition, 0, 2000)
+	for i := 0; i < 1000; i++ {
+		partitions = append(partitions, dup, other) // repeatedly the same two partitions
+	}
+
+	done := make(chan struct{})
+	go func() {
+		proc.FailoverPartitions(partitions)
+		proc.FailoverPartitions(partitions) // second call while a signal is already pending
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("FailoverPartitions blocked")
+	}
+
+	// Deduped down to the two distinct partitions regardless of how many were queued.
+	proc.failoverMu.Lock()
+	assert.Len(t, proc.pendingFailover, 2)
+	assert.Contains(t, proc.pendingFailover, dup.key())
+	assert.Contains(t, proc.pendingFailover, other.key())
+	proc.failoverMu.Unlock()
+
+	// The wake-up signal is coalesced to a single pending token.
+	assert.Equal(t, 1, len(proc.failoverSignal))
+}
+
+// TestFailoverPartitions_PreemptsInProgressSweep verifies the Q2 requirement: a failover
+// interrupts an in-progress periodic ProcessShard sweep and reprocesses the failed-over
+// partition first.
+func TestFailoverPartitions_PreemptsInProgressSweep(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ts := clock.NewMockedTimeSource()
+	mgr := persistence.NewMockHistoryTaskDLQManager(ctrl)
+
+	// Buffered so the restarted sweep after preemption can send again without a second reader.
+	sweepStarted := make(chan struct{}, 10)
+	partitionRan := make(chan persistence.HistoryDLQGetAckLevelsRequest, 1)
+
+	// Shard-level sweep query: blocks until its context is canceled by the preemption.
+	mgr.EXPECT().GetHistoryDLQAckLevels(gomock.Any(), persistence.HistoryDLQGetAckLevelsRequest{ShardID: 1}).DoAndReturn(
+		func(ctx context.Context, _ persistence.HistoryDLQGetAckLevelsRequest) ([]persistence.HistoryDLQAckLevel, error) {
+			sweepStarted <- struct{}{}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}).AnyTimes()
+	// Partition-level failover query: must run once the sweep has been preempted.
+	mgr.EXPECT().GetHistoryDLQAckLevels(gomock.Any(), persistence.HistoryDLQGetAckLevelsRequest{
+		ShardID: 1, DomainID: "d", ClusterAttributeScope: "s", ClusterAttributeName: "n",
+	}).DoAndReturn(
+		func(_ context.Context, req persistence.HistoryDLQGetAckLevelsRequest) ([]persistence.HistoryDLQAckLevel, error) {
+			select {
+			case partitionRan <- req:
+			default:
+			}
+			return nil, nil
+		}).AnyTimes()
+
+	proc := newProcessor(t, newProcessorParams{
+		Manager:           mgr,
+		Reinjector:        NewMockTaskReinjector(ctrl),
+		DomainMode:        constants.HistoryTaskDLQModeEnabled,
+		ProcessingEnabled: true,
+		TimeSource:        ts,
+	})
+	proc.Start()
+	defer proc.Stop()
+
+	// Kick off a periodic sweep and wait for it to block inside the shard-level query.
+	ts.BlockUntil(1)
+	ts.Advance(defaultTestProcessingInterval)
+	select {
+	case <-sweepStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("periodic sweep did not start")
+	}
+
+	// Fire a failover; it must cancel the in-flight sweep and process the partition first.
+	proc.FailoverPartitions([]Partition{{DomainID: "d", ClusterAttributeScope: "s", ClusterAttributeName: "n"}})
+
+	select {
+	case req := <-partitionRan:
+		assert.Equal(t, "d", req.DomainID)
+		assert.Equal(t, "s", req.ClusterAttributeScope)
+		assert.Equal(t, "n", req.ClusterAttributeName)
+	case <-time.After(5 * time.Second):
+		t.Fatal("failover partition was not processed after preempting the sweep")
+	}
+}
+
+func TestFailoverPartitions_WhenNotEnabled_DoesNotProcess(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mgr := persistence.NewMockHistoryTaskDLQManager(ctrl)
+	called := make(chan struct{}, 1)
+	mgr.EXPECT().GetHistoryDLQAckLevels(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, _ persistence.HistoryDLQGetAckLevelsRequest) ([]persistence.HistoryDLQAckLevel, error) {
+			select {
+			case called <- struct{}{}:
+			default:
+			}
+			return nil, nil
+		}).AnyTimes()
+
+	proc := newProcessor(t, newProcessorParams{
+		Manager:           mgr,
+		Reinjector:        NewMockTaskReinjector(ctrl),
+		DomainMode:        constants.HistoryTaskDLQModeEnabled,
+		ProcessingEnabled: false,
+		TimeSource:        clock.NewMockedTimeSource(),
+	})
+	proc.Start()
+	defer proc.Stop()
+
+	proc.FailoverPartitions([]Partition{{DomainID: "test-domain"}})
+
+	// enabled() is false, so the loop drains the request but must not process it.
+	select {
+	case <-called:
+		t.Fatal("ProcessPartition ran while the processor was disabled")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
