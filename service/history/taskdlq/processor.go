@@ -25,12 +25,15 @@ package taskdlq
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.uber.org/multierr"
 
 	"github.com/uber/cadence/common"
+	"github.com/uber/cadence/common/backoff"
 	"github.com/uber/cadence/common/clock"
 	"github.com/uber/cadence/common/dynamicconfig/dynamicproperties"
 	"github.com/uber/cadence/common/log"
@@ -40,6 +43,10 @@ import (
 	"github.com/uber/cadence/service/history/constants"
 	"github.com/uber/cadence/service/history/shard"
 )
+
+// sweepIntervalJitterCoefficient spreads periodic sweeps across shards; see
+// emitDLQSizeMetricsLoop in service/history/replication/dlq_handler.go for precedent.
+const sweepIntervalJitterCoefficient = 0.15
 
 type (
 	// Processor reads tasks from the history task DLQ and executes them synchronously.
@@ -82,17 +89,18 @@ type (
 	MaxReadLevelFn func(category persistence.HistoryTaskCategory) persistence.HistoryTaskKey
 
 	ProcessorImpl struct {
-		shardID       int
-		mgr           persistence.HistoryTaskDLQManager
-		reinjector    TaskReinjector
-		maxReadLevel  MaxReadLevelFn
-		pageSize      int
-		interval      dynamicproperties.DurationPropertyFnWithShardIDFilter
-		domainMode    dynamicproperties.StringPropertyFnWithDomainFilter
-		enabled       dynamicproperties.BoolPropertyFn
-		timeSource    clock.TimeSource
-		metricsClient metrics.Client
-		logger        log.Logger
+		shardID                int
+		mgr                    persistence.HistoryTaskDLQManager
+		reinjector             TaskReinjector
+		maxReadLevel           MaxReadLevelFn
+		pageSize               int
+		interval               dynamicproperties.DurationPropertyFnWithShardIDFilter
+		failoverJitterMaxDelay dynamicproperties.DurationPropertyFn
+		domainMode             dynamicproperties.StringPropertyFnWithDomainFilter
+		enabled                dynamicproperties.BoolPropertyFn
+		timeSource             clock.TimeSource
+		metricsClient          metrics.Client
+		logger                 log.Logger
 
 		status    int32
 		ctx       context.Context
@@ -120,14 +128,15 @@ type (
 		Reinjector TaskReinjector
 		// MaxReadLevel provides the exclusive upper bound for each processing round.
 		// Optional: defaults to an unbounded read (MaximumHistoryTaskKey) when nil.
-		MaxReadLevel  MaxReadLevelFn
-		PageSize      int
-		Interval      dynamicproperties.DurationPropertyFnWithShardIDFilter
-		DomainMode    dynamicproperties.StringPropertyFnWithDomainFilter
-		Enabled       dynamicproperties.BoolPropertyFn
-		TimeSource    clock.TimeSource
-		MetricsClient metrics.Client
-		Logger        log.Logger
+		MaxReadLevel           MaxReadLevelFn
+		PageSize               int
+		Interval               dynamicproperties.DurationPropertyFnWithShardIDFilter
+		FailoverJitterMaxDelay dynamicproperties.DurationPropertyFn
+		DomainMode             dynamicproperties.StringPropertyFnWithDomainFilter
+		Enabled                dynamicproperties.BoolPropertyFn
+		TimeSource             clock.TimeSource
+		MetricsClient          metrics.Client
+		Logger                 log.Logger
 	}
 )
 
@@ -146,21 +155,22 @@ func NewProcessor(params ProcessorParams) *ProcessorImpl {
 		}
 	}
 	return &ProcessorImpl{
-		shardID:         params.ShardID,
-		mgr:             params.Manager,
-		reinjector:      params.Reinjector,
-		maxReadLevel:    maxReadLevel,
-		pageSize:        params.PageSize,
-		interval:        params.Interval,
-		domainMode:      params.DomainMode,
-		enabled:         params.Enabled,
-		timeSource:      params.TimeSource,
-		metricsClient:   params.MetricsClient,
-		logger:          params.Logger,
-		status:          common.DaemonStatusInitialized,
-		cancel:          func() {}, // no-op until Start() sets the real cancel
-		pendingFailover: make(map[string]Partition),
-		failoverSignal:  make(chan struct{}, 1),
+		shardID:                params.ShardID,
+		mgr:                    params.Manager,
+		reinjector:             params.Reinjector,
+		maxReadLevel:           maxReadLevel,
+		pageSize:               params.PageSize,
+		interval:               params.Interval,
+		failoverJitterMaxDelay: params.FailoverJitterMaxDelay,
+		domainMode:             params.DomainMode,
+		enabled:                params.Enabled,
+		timeSource:             params.TimeSource,
+		metricsClient:          params.MetricsClient,
+		logger:                 params.Logger,
+		status:                 common.DaemonStatusInitialized,
+		cancel:                 func() {}, // no-op until Start() sets the real cancel
+		pendingFailover:        make(map[string]Partition),
+		failoverSignal:         make(chan struct{}, 1),
 	}
 }
 
@@ -186,21 +196,23 @@ func NewProcessorFromShard(
 	// TODO(c-warren): Convert pageSize to a dynamic property.
 	pageSize int,
 	interval dynamicproperties.DurationPropertyFnWithShardIDFilter,
+	failoverJitterMaxDelay dynamicproperties.DurationPropertyFn,
 	domainMode dynamicproperties.StringPropertyFnWithDomainFilter,
 	enabled dynamicproperties.BoolPropertyFn,
 ) *ProcessorImpl {
 	return NewProcessor(ProcessorParams{
-		ShardID:       shard.GetShardID(),
-		Manager:       shard.GetService().GetHistoryTaskDLQManager(),
-		Reinjector:    shard,
-		MaxReadLevel:  NewShardMaxReadLevelFn(shard),
-		PageSize:      pageSize,
-		Interval:      interval,
-		DomainMode:    domainMode,
-		Enabled:       enabled,
-		TimeSource:    shard.GetTimeSource(),
-		MetricsClient: shard.GetMetricsClient(),
-		Logger:        shard.GetLogger(),
+		ShardID:                shard.GetShardID(),
+		Manager:                shard.GetService().GetHistoryTaskDLQManager(),
+		Reinjector:             shard,
+		MaxReadLevel:           NewShardMaxReadLevelFn(shard),
+		PageSize:               pageSize,
+		Interval:               interval,
+		FailoverJitterMaxDelay: failoverJitterMaxDelay,
+		DomainMode:             domainMode,
+		Enabled:                enabled,
+		TimeSource:             shard.GetTimeSource(),
+		MetricsClient:          shard.GetMetricsClient(),
+		Logger:                 shard.GetLogger(),
 	})
 }
 
@@ -238,7 +250,7 @@ func (p *ProcessorImpl) processLoop() {
 	defer p.wg.Done()
 	defer func() { log.CapturePanic(recover(), p.logger, nil) }()
 
-	timer := p.timeSource.NewTimer(p.interval(p.shardID))
+	timer := p.timeSource.NewTimer(p.sweepInterval())
 	defer timer.Stop()
 
 	for {
@@ -252,9 +264,15 @@ func (p *ProcessorImpl) processLoop() {
 			p.runSweep()
 			// A failover may have preempted the sweep; drain it before the next tick.
 			p.processPendingFailovers()
-			timer.Reset(p.interval(p.shardID))
+			timer.Reset(p.sweepInterval())
 		}
 	}
+}
+
+// sweepInterval returns the configured sweep interval with jitter applied so
+// shards' periodic sweeps don't run in synchronized cluster-wide waves.
+func (p *ProcessorImpl) sweepInterval() time.Duration {
+	return backoff.JitDuration(p.interval(p.shardID), sweepIntervalJitterCoefficient)
 }
 
 // runSweep runs one periodic ProcessShard synchronously under a cancelable context.
@@ -285,6 +303,24 @@ func (p *ProcessorImpl) runSweep() {
 
 // processPendingFailovers drains the pending failover set and processes each partition.
 func (p *ProcessorImpl) processPendingFailovers() {
+	p.failoverMu.Lock()
+	if len(p.pendingFailover) == 0 {
+		p.failoverMu.Unlock()
+		return
+	}
+	p.failoverMu.Unlock()
+
+	if window := p.failoverJitterMaxDelay(); window > 0 {
+		delay := time.Duration(rand.Int63n(int64(window)) + 1)
+		timer := p.timeSource.NewTimer(delay)
+		select {
+		case <-timer.Chan():
+		case <-p.ctx.Done():
+			timer.Stop()
+			return
+		}
+	}
+
 	p.failoverMu.Lock()
 	parts := make([]Partition, 0, len(p.pendingFailover))
 	for _, part := range p.pendingFailover {
