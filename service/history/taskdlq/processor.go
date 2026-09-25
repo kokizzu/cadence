@@ -88,9 +88,13 @@ type (
 	// of the given category in the current processing round.
 	MaxReadLevelFn func(category persistence.HistoryTaskCategory) persistence.HistoryTaskKey
 
+	// DomainNameFn resolves a domain ID to its domain name (e.g. cache.DomainCache.GetDomainName).
+	DomainNameFn func(domainID string) (string, error)
+
 	ProcessorImpl struct {
 		shardID                int
 		mgr                    persistence.HistoryTaskDLQManager
+		getDomainName          DomainNameFn
 		reinjector             TaskReinjector
 		maxReadLevel           MaxReadLevelFn
 		pageSize               int
@@ -125,6 +129,7 @@ type (
 	ProcessorParams struct {
 		ShardID    int
 		Manager    persistence.HistoryTaskDLQManager
+		DomainName DomainNameFn
 		Reinjector TaskReinjector
 		// MaxReadLevel provides the exclusive upper bound for each processing round.
 		// Optional: defaults to an unbounded read (MaximumHistoryTaskKey) when nil.
@@ -157,6 +162,7 @@ func NewProcessor(params ProcessorParams) *ProcessorImpl {
 	return &ProcessorImpl{
 		shardID:                params.ShardID,
 		mgr:                    params.Manager,
+		getDomainName:          params.DomainName,
 		reinjector:             params.Reinjector,
 		maxReadLevel:           maxReadLevel,
 		pageSize:               params.PageSize,
@@ -203,6 +209,7 @@ func NewProcessorFromShard(
 	return NewProcessor(ProcessorParams{
 		ShardID:                shard.GetShardID(),
 		Manager:                shard.GetService().GetHistoryTaskDLQManager(),
+		DomainName:             shard.GetDomainCache().GetDomainName,
 		Reinjector:             shard,
 		MaxReadLevel:           NewShardMaxReadLevelFn(shard),
 		PageSize:               pageSize,
@@ -378,9 +385,19 @@ func (p *ProcessorImpl) ProcessShard(ctx context.Context) error {
 	return p.processAckLevels(ctx, ackLevels)
 }
 
+// domainName resolves a domain ID to its domain name, falling back to the ID if the lookup fails.
+func (p *ProcessorImpl) domainName(domainID string) string {
+	domainName, err := p.getDomainName(domainID)
+	if err != nil {
+		p.logger.Debug("Failed to get domain name from domain cache. Defaulting to domain ID.", tag.WorkflowDomainID(domainID), tag.Error(err))
+		return domainID
+	}
+	return domainName
+}
+
 func (p *ProcessorImpl) ProcessPartition(ctx context.Context, domainID, clusterAttributeScope, clusterAttributeName string) error {
 	// Fast-fail for direct callers; processAckLevel also guards each partition individually.
-	if p.domainMode(domainID) != constants.HistoryTaskDLQModeEnabled {
+	if p.domainMode(p.domainName(domainID)) != constants.HistoryTaskDLQModeEnabled {
 		p.logger.Debug("DLQ not enabled for domain, skipping partition processing", tag.ShardID(p.shardID), tag.WorkflowDomainID(domainID))
 		return nil
 	}
@@ -464,7 +481,7 @@ func (p *ProcessorImpl) processAckLevels(ctx context.Context, ackLevels []persis
 // to the executions table.
 // Returns an error when the domain is not enabled or when the tasks cannot be fetched or re-injected.
 func (p *ProcessorImpl) processAckLevel(ctx context.Context, al persistence.HistoryDLQAckLevel) error {
-	if p.domainMode(al.DomainID) != constants.HistoryTaskDLQModeEnabled {
+	if p.domainMode(p.domainName(al.DomainID)) != constants.HistoryTaskDLQModeEnabled {
 		p.logger.Debug("DLQ not enabled for domain, skipping ack level processing", tag.ShardID(p.shardID), tag.WorkflowDomainID(al.DomainID))
 		return nil
 	}
