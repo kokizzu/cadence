@@ -802,7 +802,7 @@ func TestStop_WhenStoreRespectsContextCancellation_ReturnsPromptly(t *testing.T)
 		TimeSource:        ts,
 	})
 
-	proc.Start()
+	require.NoError(t, proc.Start(context.Background()))
 
 	ts.BlockUntil(1)
 	ts.Advance(time.Duration(float64(defaultTestProcessingInterval) * (1 + sweepIntervalJitterCoefficient)))
@@ -815,7 +815,7 @@ func TestStop_WhenStoreRespectsContextCancellation_ReturnsPromptly(t *testing.T)
 
 	stopDone := make(chan struct{})
 	go func() {
-		proc.Stop()
+		assert.NoError(t, proc.Stop(context.Background()))
 		close(stopDone)
 	}()
 	select {
@@ -823,6 +823,50 @@ func TestStop_WhenStoreRespectsContextCancellation_ReturnsPromptly(t *testing.T)
 	case <-time.After(5 * time.Second):
 		t.Fatal("Stop() did not return promptly after context cancellation")
 	}
+}
+
+func TestStop_WhenLoopIsStuck_ReturnsContextError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ts := clock.NewMockedTimeSource()
+	mgr := persistence.NewMockHistoryTaskDLQManager(ctrl)
+
+	// A store call that ignores context cancellation and blocks until released,
+	// simulating a stuck processing loop.
+	inGetAckLevels := make(chan struct{}, 1)
+	release := make(chan struct{})
+	mgr.EXPECT().GetHistoryDLQAckLevels(gomock.Any(), persistence.HistoryDLQGetAckLevelsRequest{ShardID: 1}).DoAndReturn(func(ctx context.Context, _ persistence.HistoryDLQGetAckLevelsRequest) ([]persistence.HistoryDLQAckLevel, error) {
+		select {
+		case inGetAckLevels <- struct{}{}:
+		default:
+		}
+		<-release
+		return nil, nil
+	}).AnyTimes()
+
+	proc := newProcessor(t, newProcessorParams{
+		Manager:           mgr,
+		Reinjector:        NewMockTaskReinjector(ctrl),
+		DomainMode:        constants.HistoryTaskDLQModeEnabled,
+		ProcessingEnabled: true,
+		TimeSource:        ts,
+	})
+
+	require.NoError(t, proc.Start(context.Background()))
+	defer close(release)
+
+	ts.BlockUntil(1)
+	ts.Advance(defaultTestProcessingInterval)
+	select {
+	case <-inGetAckLevels:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for GetAckLevels to be called")
+	}
+
+	stopCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, proc.Stop(stopCtx), context.Canceled)
 }
 
 // Documents a known limitation: if DeleteTasks fails and no new tasks arrive,
@@ -863,6 +907,46 @@ func TestProcessShard_WhenDeleteTasksFailsAndDLQBecomesEmpty_OrphanedRowsNotClea
 	assert.NoError(t, proc.ProcessShard(context.Background()))
 }
 
+func TestStart_WhenParentContextCanceled_LoopExitsAndStopReturns(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ts := clock.NewMockedTimeSource()
+	mgr := persistence.NewMockHistoryTaskDLQManager(ctrl)
+	// The loop must exit on parent cancellation before the first sweep ever fires,
+	// so no store call is expected.
+
+	proc := newProcessor(t, newProcessorParams{
+		Manager:           mgr,
+		Reinjector:        NewMockTaskReinjector(ctrl),
+		DomainMode:        constants.HistoryTaskDLQModeEnabled,
+		ProcessingEnabled: true,
+		TimeSource:        ts,
+	})
+
+	parent, cancel := context.WithCancel(context.Background())
+	require.NoError(t, proc.Start(parent))
+	ts.BlockUntil(1) // loop is parked on its sweep timer
+	cancel()
+
+	// Advancing the timer after cancellation must not trigger a sweep: the loop
+	// is gone. Give it a moment to observe cancellation first.
+	loopDone := make(chan struct{})
+	go func() {
+		proc.wg.Wait()
+		close(loopDone)
+	}()
+	select {
+	case <-loopDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("processing loop did not exit after parent context cancellation")
+	}
+	ts.Advance(defaultTestProcessingInterval)
+
+	// Stop still transitions cleanly and returns promptly.
+	require.NoError(t, proc.Stop(context.Background()))
+}
+
 func TestStartStop_ShouldBeIdempotent(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -876,10 +960,10 @@ func TestStartStop_ShouldBeIdempotent(t *testing.T) {
 		TimeSource:        clock.NewMockedTimeSource(),
 	})
 
-	proc.Start()
-	proc.Start() // second call must be a no-op
-	proc.Stop()
-	proc.Stop() // second call must be a no-op
+	require.NoError(t, proc.Start(context.Background()))
+	require.NoError(t, proc.Start(context.Background())) // second call must be a no-op
+	require.NoError(t, proc.Stop(context.Background()))
+	require.NoError(t, proc.Stop(context.Background())) // second call must be a no-op
 }
 
 func TestStart_ShouldCallProcessShardOnInterval(t *testing.T) {
@@ -905,8 +989,8 @@ func TestStart_ShouldCallProcessShardOnInterval(t *testing.T) {
 		TimeSource:        ts,
 	})
 
-	proc.Start()
-	defer proc.Stop()
+	require.NoError(t, proc.Start(context.Background()))
+	defer proc.Stop(context.Background())
 
 	ts.BlockUntil(1)
 	ts.Advance(time.Duration(float64(defaultTestProcessingInterval) * (1 + sweepIntervalJitterCoefficient)))
@@ -933,8 +1017,8 @@ func TestStart_WhenNotEnabled_SkipsProcessingButContinuesLoop(t *testing.T) {
 		TimeSource:        ts,
 	})
 
-	proc.Start()
-	defer proc.Stop()
+	require.NoError(t, proc.Start(context.Background()))
+	defer proc.Stop(context.Background())
 
 	// The loop always starts; wait for the first timer to be registered.
 	ts.BlockUntil(1)
@@ -989,8 +1073,8 @@ func TestFailoverPartitions_DispatchesToProcessPartition(t *testing.T) {
 		ProcessingEnabled: true,
 		TimeSource:        clock.NewMockedTimeSource(),
 	})
-	proc.Start()
-	defer proc.Stop()
+	require.NoError(t, proc.Start(context.Background()))
+	defer proc.Stop(context.Background())
 
 	proc.FailoverPartitions([]Partition{{
 		DomainID:              "test-domain",
@@ -1098,8 +1182,8 @@ func TestFailoverPartitions_PreemptsInProgressSweep(t *testing.T) {
 		ProcessingEnabled: true,
 		TimeSource:        ts,
 	})
-	proc.Start()
-	defer proc.Stop()
+	require.NoError(t, proc.Start(context.Background()))
+	defer proc.Stop(context.Background())
 
 	// Kick off a periodic sweep and wait for it to block inside the shard-level query.
 	ts.BlockUntil(1)
@@ -1145,8 +1229,8 @@ func TestFailoverPartitions_WhenNotEnabled_DoesNotProcess(t *testing.T) {
 		ProcessingEnabled: false,
 		TimeSource:        clock.NewMockedTimeSource(),
 	})
-	proc.Start()
-	defer proc.Stop()
+	require.NoError(t, proc.Start(context.Background()))
+	defer proc.Stop(context.Background())
 
 	proc.FailoverPartitions([]Partition{{DomainID: "test-domain"}})
 
